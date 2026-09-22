@@ -1,0 +1,20 @@
+# Xcode
+build/
+DerivedData/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# XcodeGen 产物（由 project.yml 生成，不入库）
+ExternalDisplayDemo.xcodeproj/
+
+# macOS
+.DS_Store
+
+# 临时调试产物（截图等）
+.scratch/
