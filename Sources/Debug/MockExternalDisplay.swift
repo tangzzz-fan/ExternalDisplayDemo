@@ -12,6 +12,10 @@ import UIKit
 ///
 /// 这层只在 `-mockExternalDisplay` 启动参数存在时生效，完全不参与真机链路；
 /// 手机端界面里会多出一个开关，方便随时收起它去做表单操作。
+///
+/// 它需要主屏的 `UIWindowScene`（替身窗口要挂上去），而 SwiftUI 没有对应的环境值 ——
+/// 但 `UIApplication.shared.connectedScenes` 随时可查，所以不需要为此在视图树里
+/// 保留一个宿主 VC。见 `mainWindowScene`。
 @MainActor
 @Observable
 final class MockExternalDisplay {
@@ -38,10 +42,22 @@ final class MockExternalDisplay {
 
     // MARK: - Lifecycle
 
-    func bootstrap(on windowScene: UIWindowScene) {
+    /// 由入口在启动与回前台时调用；未开 `-mockExternalDisplay` 时是 no-op。
+    ///
+    /// 主屏 scene 在这里自己查：SwiftUI 没有 windowScene 的环境值，但 `UIApplication`
+    /// 随时可查，所以不必往视图树里塞一个宿主 VC 专门去「登记」一个出来。
+    func bootstrap() {
         guard Self.isEnabled else { return }
-        self.windowScene = windowScene
+        guard let scene = Self.mainWindowScene else { return }
+        self.windowScene = scene
         if !isVisible { isVisible = true }  // didSet → install()
+    }
+
+    /// 主屏（`windowApplication` role）的 `UIWindowScene`。
+    static var mainWindowScene: UIWindowScene? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.session.role == .windowApplication }
     }
 
     /// 手机 scene 断开时调用，保证不留悬挂的 window。
