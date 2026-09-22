@@ -33,8 +33,6 @@
 				<dict>
 					<key>UISceneConfigurationName</key>
 					<string>Phone Scene</string>
-					<key>UISceneDelegateClassName</key>
-					<string>$(PRODUCT_MODULE_NAME).MainSceneDelegate</string>
 				</dict>
 			</array>
 			<key>UIWindowSceneSessionRoleExternalDisplayNonInteractive</key>

@@ -125,9 +125,8 @@ ExternaldisplayDemo/
 ├── Support/Info.plist                             scene manifest 在这里
 └── Sources/
     ├── App/
-    │   ├── AppDelegate.swift                      @main，只承载生命周期
-    │   ├── MainSceneDelegate.swift                手机屏 scene
-    │   ├── PhoneRootViewController.swift          手机端 UI 宿主 + scene accessory 注册
+    │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）
+    │   ├── PhoneSceneBridge.swift                 零尺寸宿主 VC：反查 windowScene + 注册 accessory
     │   ├── PhoneRootView.swift                    状态面板 + 推送内容控制
     │   ├── RemoteControlPad.swift                 手机端遥控板（手势采集）
     │   └── RemoteControlDock.swift                底部常驻遥控台（safeAreaInset 宿主）
@@ -266,6 +265,9 @@ open ExternalDisplayDemo.xcodeproj
     （`.safeAreaInset`），或换成承载 `UIPanGestureRecognizer` 的 `UIViewRepresentable`。
 12. **让浮层窗口与底部常驻 UI 抢位置** → 替身窗口在 `.normal + 1` 层永远盖住主窗口，
     必须主动为底部面板预留空间（见第五节），否则展开时会遮住面板标题栏。
+13. **SwiftUI `App` 生命周期下，把 `UIWindowSceneSessionRoleApplication` 从
+    `UISceneConfigurations` 里删掉** → app scene 连不上，**纯黑屏、零日志**。
+    该条目必须留，但不能带 `UISceneDelegateClassName`。详见第八节。
 
 ---
 
@@ -282,3 +284,71 @@ open ExternalDisplayDemo.xcodeproj
   `RemoteControl`）。真需要外接屏自己接收触摸，得改用 iPad 台前调度那条 interactive 路径。
 - **本 demo 刻意没做的**：交互式外接屏（iPad 台前调度把应用窗口搬到外接屏）、
   自定义分辨率协商、外接屏音频路由。
+
+---
+
+## 八、纯 SwiftUI 生命周期变体
+
+本节描述 **`pure-swiftui` 分支**。`main` 上那套 `AppDelegate` + `MainSceneDelegate` +
+`PhoneRootViewController` 三层派发，在这里换成 SwiftUI 原生生命周期。
+
+### 能换掉什么、换不掉什么
+
+| | `main` | `pure-swiftui` |
+| --- | --- | --- |
+| `@main` | `AppDelegate` | `ExternalDisplayDemoApp: App` |
+| 主屏 scene | `MainSceneDelegate` | `WindowGroup` |
+| 手机端 UI 宿主 | `PhoneRootViewController` | `PhoneSceneBridge`（零尺寸宿主 VC） |
+| scene accessory 注册 | `PhoneRootViewController.viewDidLoad` | `PhoneSceneBridge.viewDidLoad` |
+| 外接屏 scene | `ExternalDisplaySceneDelegate` | **不变** |
+| Info.plist external role | 声明 | **不变** |
+
+**外接屏那一路换不掉**：SwiftUI 的 `App` / `Scene` / `WindowGroup` 只能创建
+`windowApplication` role 的 scene，没有任何 API 能接管
+`windowExternalDisplayNonInteractive`。所以「纯 SwiftUI」到手机端为止。
+
+### 两个 SwiftUI 拿不到的东西
+
+`PhoneSceneBridge` 存在的唯一理由就是补上这两样：
+
+1. **主屏 `UIWindowScene`** —— SwiftUI 只有 `scenePhase`，没有 windowScene 环境值。
+   优先从 `view.window?.windowScene` 反查；`viewDidLoad` 阶段 `view.window` 还是 nil，
+   退回遍历 `UIApplication.shared.connectedScenes` 找 `windowApplication` role。
+2. **`registerSceneAccessory(_:)` 的宿主** —— iOS 27 起必须在「主界面里的一个
+   view controller」上注册，且句柄要强引用住。
+
+它是根视图 `.background` 里一个零尺寸、`allowsHitTesting(false)` 的
+`UIViewControllerRepresentable`，不参与布局。
+
+### ★ 踩到的坑：只声明 external role 会黑屏
+
+把 `UISceneConfigurations` 里的 `UIWindowSceneSessionRoleApplication` 条目删掉之后，
+应用启动是**纯黑屏**：进程存活、无崩溃报告、**日志里一个 error 都没有**。
+把根视图换成一个纯色（`Color.red`）依然黑屏 —— 说明与视图层无关，是 app scene 压根没连上
+（黑屏其实是 `UILaunchScreen` 没被替换掉）。
+
+规则是：
+
+- `UISceneConfigurations` 字典**存在**时，必须包含 `UIWindowSceneSessionRoleApplication`
+  条目，否则 app scene 连不上（本坑）；
+- 但该条目**不能**带 `UISceneDelegateClassName`，否则会与 SwiftUI 自己装的
+  scene delegate 冲突；
+- 若把整个 `UISceneConfigurations` 字典删掉，SwiftUI 反而正常 ——
+  代价是 iOS 17~26 的「plist 自动连接外接屏」那条路也没了。
+
+所以最终形态：application role 留一个只有 `UISceneConfigurationName` 的空壳条目，
+external role 保持原样。
+
+### 生命周期钩子的差异
+
+SwiftUI 没有 `sceneDidDisconnect` 的等价物。原 `MainSceneDelegate` 在那里调用的
+`MockExternalDisplay.shared.reset()`，这里挂在 `scenePhase` 的 `.background` 上近似，
+并在 `.active` 时用 `PhoneSceneLocator` 存的主屏 scene 重新 bootstrap ——
+否则进一次后台，替身窗口就永久消失了。真实项目若有必须在 scene 断开时释放的资源，
+这一条要另行设计。
+
+### 验证
+
+Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两种启动都实跑截图确认
+（替身窗口正常挂载 / 「未检测到外接屏」正常显示）。iOS 17~26 的旧路径在本机无法实测
+（只有 iOS 27 运行时）。
