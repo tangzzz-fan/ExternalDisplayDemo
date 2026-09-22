@@ -21,7 +21,7 @@ iOS 模拟器**永远不会创建** `windowExternalDisplayNonInteractive` 的 sc
 
 ## 二、问题：模拟器不会给你外接屏 scene
 
-iOS 13 起接入外接屏只有一条路径 —— **scene**。应用在 Info.plist 里声明 `UIWindowSceneSessionRoleExternalDisplayNonInteractive`（iOS 27 起还需主动调 `registerSceneAccessory(_:)`），系统才会为外接屏建立独立的 `UISceneSession` 并回调 scene delegate。
+iOS 13 起接入外接屏只有一条路径 —— **scene**。应用在 Info.plist 里声明 `UIWindowSceneSessionRoleExternalDisplayNonInteractive`（iOS 27 起该声明不再生效，必须另行注册 scene accessory：SwiftUI 用 `View.sceneAccessory { ExternalNonInteractiveAccessory { … } }`，UIKit 用 `UIViewController.registerSceneAccessory(_:)`），系统才会为外接屏建立独立的 `UISceneSession` 并回调 scene delegate。
 
 但在模拟器里，这个 scene **永远不会被创建**。`UIScreen.screens` 也永远只有主屏一个。
 

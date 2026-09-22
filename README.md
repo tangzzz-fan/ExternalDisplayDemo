@@ -20,9 +20,9 @@
 | 主屏 | `UIScreen.main` | iOS 2.0 – 26.0 | ❌ iOS 26 弃用 |
 | **外接屏 scene role** | `UISceneSession.Role.windowExternalDisplayNonInteractive` | **iOS 16.0+** | ✅ 唯一正解 |
 | 旧 role | `.windowExternalDisplay` | iOS 13.0 – 16.0 | ❌ 已废弃，被上面那个取代 |
-| 屏幕信息 | `windowScene.screen.nativeBounds` / `.nativeScale` | iOS 13+ | ✅ |
+| 屏幕信息（外接屏） | `windowScene.screen.nativeBounds` / `.nativeScale` | iOS 13+ | ⚠️ 只有 iOS 17~26 路径可达；iOS 27 的 SwiftUI accessory 内容没有 `windowScene`，只能自己量 |
 | 自动连接 scene | 仅在 Info.plist 声明 role | iOS 16 – 26 | ⚠️ **iOS 27 起失效** |
-| **主动注册 scene** | `UIViewController.registerSceneAccessory(_:)` + `UISceneAccessory.externalNonInteractive(sceneConfiguration:)` | **iOS 27.0+** | ✅ **iOS 27 起必须** |
+| **主动注册 scene** | SwiftUI：`View.sceneAccessory { ExternalNonInteractiveAccessory { … } }`（本工程用这条）<br>UIKit：`UIViewController.registerSceneAccessory(_:)` + `UISceneAccessory` | **iOS 27.0+** | ✅ **iOS 27 起必须注册**（二选一） |
 
 ### 最关键的一条
 
@@ -34,7 +34,7 @@
 也就是：
 
 - **iOS 17 ~ 26**：Info.plist 里声明了 role，插上屏系统就自动送 scene 过来。
-- **iOS 27 起**：光声明 plist 不够，必须调 `registerSceneAccessory(_:)`，否则系统根本不会连这个 scene。
+- **iOS 27 起**：光声明 plist 不够，必须注册 scene accessory（SwiftUI 声明式或 UIKit 主动调），否则系统根本不会连这个 scene。
 
 **失败表现**：外接屏上只是把手机画面镜像过去（竖屏 letterbox 在大屏中央），**没有报错、没有日志**。
 这类"静默失败"是排查 external display 时最耗时的一种，所以本工程把两条路径都实现了。
@@ -53,11 +53,13 @@ UIApplicationSceneManifest
 └── UISceneConfigurations
     ├── UIWindowSceneSessionRoleApplication                          → 空壳条目（可有可无，见下）
     └── UIWindowSceneSessionRoleExternalDisplayNonInteractive        → ExternalDisplaySceneDelegate
+                                                                       （仅 iOS 17~26 生效）
 ```
 
 三个易错点：
 
 - **真正必需的是 external role 那一条**，它是 iOS 17~26「plist 自动连接外接屏」的唯一声明处。
+  但它**只够 iOS 17~26 用** —— iOS 27 起还必须做第 3 步的 accessory 注册，光有声明只会镜像。
   application role 那条只是本项目保留下来的惰性占位：
   **实测（iOS 27）删掉它、甚至把整块 `UISceneConfigurations` 删掉，SwiftUI 都照常启动**，
   详见第八节的对照表。
@@ -86,7 +88,7 @@ UIApplicationSceneManifest
 
 - **不要**设置 `UIRequiresFullScreen = YES`。iPhone 上这个键会让应用直接失去外部显示器能力。
 
-### 2. 实现外接屏 scene delegate
+### 2. 实现外接屏 scene delegate（**仅 iOS 17~26 会走到**）
 
 见 `Sources/ExternalDisplay/ExternalDisplaySceneDelegate.swift`：
 
@@ -97,7 +99,7 @@ func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
           let windowScene = scene as? UIWindowScene else { return }
 
     let window = UIWindow(windowScene: windowScene)
-    window.rootViewController = UIHostingController(rootView: ...)
+    window.rootViewController = UIHostingController(rootView: ExternalDisplayRootView())
     window.isHidden = false          // 不要 makeKeyAndVisible()
     self.window = window
 }
@@ -108,9 +110,45 @@ func sceneDidDisconnect(_ scene: UIScene) { window = nil }
 为什么不用 `makeKeyAndVisible()`：外接屏窗口不该从手机屏抢走 key 状态，
 否则手机端第一响应者 / 键盘焦点可能被打断。只设 `isHidden = false` 即可显示。
 
+> **iOS 27 起这个方法不会被调用** —— 那条路在第 3 步，由 scene accessory 交给 SwiftUI
+> 直接呈现，不经过任何 scene delegate。两步**互不冲突**：各管一个系统版本区间，
+> 渲染的是同一份 `ExternalDisplayRootView`（所以它自己量分辨率，见第 3 步）。
+
 ### 3. iOS 27+：注册 scene accessory
 
-见 `Sources/App/PhoneSceneBridge.swift`：
+本工程走 **SwiftUI 原生**那条，见 `Sources/ExternalDisplay/ExternalDisplayAccessory.swift`
+（`.externalDisplaySceneAccessory()` 挂在 `WindowGroup` 的根视图上）：
+
+```swift
+if #available(iOS 27.0, *) {
+    content.sceneAccessory {
+        ExternalNonInteractiveAccessory {
+            ExternalDisplayRootView(onMetricsChange: report)
+        }
+        .onAvailabilityChange { isAvailable in
+            ExternalDisplayMonitor.shared.setAccessoryAvailable(isAvailable)
+        }
+    }
+} else {
+    content      // iOS 17~26：由 Info.plist 的 external role 自动连接
+}
+```
+
+要点：
+
+- **不需要宿主 VC**。UIKit 那条路（`UIViewController.registerSceneAccessory(_:)`）的语义是
+  「随该 VC 的呈现状态生效」，于是必须凑一个真实存在于视图层级里的控制器、还要担心它有没有
+  真的在呈现；声明式写法由系统决定何时呈现，没有这个前置条件。
+- **不需要自己强引用注册句柄**（UIKit 那条路返回的 `UISceneAccessoryRegistration` 一松手就失效）。
+- `sceneAccessory` 标了 `@available(iOS 27.0, *)`，而本 target 的 deployment target 是 17.0，
+  所以必须包在 `if #available` 里 —— 注意 `ViewModifier.body` 的两个分支能直接这样写。
+- `onAvailabilityChange` 是**唯一**能在无硬件时确认「注册被系统接受」的可观测信号：
+  没有外接屏时它会被回调一次 `false`（本工程在 DEBUG 下把它打到了控制台）。
+- 纯 SwiftUI 路径拿不到 `windowScene`（没有 scene delegate 就没有），所以分辨率由外接屏那份
+  内容自己量（视口点数 × `displayScale`）后回报给 `ExternalDisplayMonitor`。
+
+<details>
+<summary>UIKit 那条路的等价写法（本工程不用，留作对照）</summary>
 
 ```swift
 if #available(iOS 27.0, *) {
@@ -125,15 +163,13 @@ if #available(iOS 27.0, *) {
 }
 ```
 
-要点：
+它的额外能力：能拿到 `windowScene.screen.nativeBounds` 这类屏参、能自定义
+`UIWindowSceneDelegate`、要传业务上下文可以用
+`externalNonInteractive(sceneConfiguration:userInfo:)` 并在 delegate 里读
+`connectionOptions.sceneAccessoryUserInfo`；要临时关掉可调 `unregisterSceneAccessory(_:)`
+或把 `registration.isEnabled` 置 false。**需要这些就用它**。
 
-- 必须在**主界面里的 view controller** 上注册，语义是「随该 VC 的呈现状态生效」：
-  VC 在屏幕上 + `registration.isEnabled == true` + 外接屏可用 → 系统才连接 scene。
-- 返回的 `UISceneAccessoryRegistration` **必须强引用住**，否则注册立即失效。
-- 需要在某一页才提供外部屏内容时，用 `unregisterSceneAccessory(_:)` 在页面退出时注销。
-- 想给 scene delegate 传业务上下文（比如"这块屏是给观众看的还是给控制台用的"），
-  用 `externalNonInteractive(sceneConfiguration:userInfo:)`，在 delegate 里读
-  `connectionOptions.sceneAccessoryUserInfo`。
+</details>
 
 ---
 
@@ -145,18 +181,18 @@ ExternaldisplayDemo/
 ├── Support/Info.plist                             scene manifest 在这里
 └── Sources/
     ├── App/
-    │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）
-    │   ├── PhoneSceneBridge.swift                 零尺寸宿主 VC：反查 windowScene + 注册 accessory
+    │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）+ accessory 声明
     │   ├── PhoneRootView.swift                    状态面板 + 推送内容控制
     │   ├── RemoteControlPad.swift                 手机端遥控板（手势采集）
     │   └── RemoteControlDock.swift                底部常驻遥控台（safeAreaInset 宿主）
     ├── Core/
-    │   ├── ExternalDisplayMonitor.swift           连接状态记录（@Observable）
+    │   ├── ExternalDisplayMonitor.swift           连接状态记录（@Observable，三个数据源）
     │   ├── DisplayContentStore.swift              共享内容状态（「选什么」）
     │   └── RemoteControl.swift                    共享交互状态（「怎么看」）
     ├── ExternalDisplay/
-    │   ├── ExternalDisplaySceneDelegate.swift     ★ 接入落点
-    │   ├── ExternalDisplayRootView.swift          外接屏根视图（纯输出，无手势）
+    │   ├── ExternalDisplayAccessory.swift         ★ iOS 27 的 scene accessory 声明（纯 SwiftUI）
+    │   ├── ExternalDisplaySceneDelegate.swift     ★ iOS 17~26 的接入落点
+    │   ├── ExternalDisplayRootView.swift          外接屏根视图（纯输出，无手势，自测量分辨率）
     │   └── DisplayPatternCanvas.swift             逐帧渲染验证
     └── Debug/
         └── MockExternalDisplay.swift              模拟器替身（不参与真机链路）
@@ -324,27 +360,29 @@ open ExternalDisplayDemo.xcodeproj
 | --- | --- | --- |
 | `@main` | `AppDelegate` | `ExternalDisplayDemoApp: App` |
 | 主屏 scene | `MainSceneDelegate` | `WindowGroup` |
-| 手机端 UI 宿主 | `PhoneRootViewController` | `PhoneSceneBridge`（零尺寸宿主 VC） |
-| scene accessory 注册 | `PhoneRootViewController.viewDidLoad` | `PhoneSceneBridge.viewDidLoad` |
-| 外接屏 scene | `ExternalDisplaySceneDelegate` | **不变** |
-| Info.plist external role | 声明 | **不变** |
+| 手机端 UI 宿主 | `PhoneRootViewController` | 不需要宿主 VC（SwiftUI 自己管） |
+| 主屏 `UIWindowScene` 的取用 | 由 `MainSceneDelegate` 登记 | 用的人自己查 `UIApplication.shared.connectedScenes` |
+| scene accessory 声明 | `PhoneRootViewController.viewDidLoad` 主动注册 | **SwiftUI 声明式**（`ExternalDisplayAccessory`） |
+| 外接屏 scene（iOS 17~26） | `ExternalDisplaySceneDelegate` | **不变** |
+| Info.plist external role | 声明 | **不变**（iOS 17~26 唯一声明处） |
 
 **外接屏那一路换不掉**：SwiftUI 的 `App` / `Scene` / `WindowGroup` 只能创建
-`windowApplication` role 的 scene，没有任何 API 能接管
-`windowExternalDisplayNonInteractive`。所以「纯 SwiftUI」到手机端为止。
+`windowApplication` role 的 scene，没有任何 API 能声明 iOS 17~26 的
+`windowExternalDisplayNonInteractive`。所以「plist + scene delegate」这套到手机端为止
+仍然保留；但 iOS 27 那条**已经全部是 SwiftUI 了**。
 
-### 两个 SwiftUI 拿不到的东西
+### 曾经借过的那个宿主 VC（现已删除）
 
-`PhoneSceneBridge` 存在的唯一理由就是补上这两样：
+改造中期曾在根视图 `.background` 挂一个零尺寸、`allowsHitTesting(false)` 的
+`UIViewControllerRepresentable`（`PhoneSceneBridge`），用来补 SwiftUI 拿不到的两样东西：
 
-1. **主屏 `UIWindowScene`** —— SwiftUI 只有 `scenePhase`，没有 windowScene 环境值。
-   优先从 `view.window?.windowScene` 反查；`viewDidLoad` 阶段 `view.window` 还是 nil，
-   退回遍历 `UIApplication.shared.connectedScenes` 找 `windowApplication` role。
+1. **主屏 `UIWindowScene`** —— 只是 debug 用的 `MockExternalDisplay` 需要；
 2. **`registerSceneAccessory(_:)` 的宿主** —— iOS 27 起必须在「主界面里的一个
-   view controller」上注册，且句柄要强引用住。
+   view controller」上注册，且返回句柄要强引用住。
 
-它是根视图 `.background` 里一个零尺寸、`allowsHitTesting(false)` 的
-`UIViewControllerRepresentable`，不参与布局。
+这两件事后来都被消掉了：第 1 件没必要「登记」—— `UIApplication.shared.connectedScenes`
+随时可查，用的人自己找就行；第 2 件改用 SwiftUI 原生 `sceneAccessory` 后根本不需要宿主 VC。
+于是 `Sources/App/` 里不再有任何 `UIViewRepresentable`。
 
 ### ★ 曾经的误会：application role 那条空壳条目其实不是必需的
 
@@ -367,8 +405,8 @@ open ExternalDisplayDemo.xcodeproj
 
 - application role 留一个只有 `UISceneConfigurationName` 的空壳条目 —— **无用但无害**；
 - external role 那条**必须留** —— 它是 **iOS 17~26**「plist 自动连接外接屏」的唯一声明处。
-  iOS 27 起这条路失效、改由 `registerSceneAccessory` 负责，且那里已显式给了 `delegateClass`，
-  原则上可省；但本工程 deployment target 是 17.0，所以保留。
+  iOS 27 起这条路失效、改由 scene accessory 负责（本工程走 SwiftUI 声明式，
+  见第二节第 3 步），原则上可省；但本工程 deployment target 是 17.0，所以保留。
 
 > **仍未验证**：本机只有 iOS 27.0 运行时，变体 B/C 在 **iOS 17~26** 上是否同样正常没测过。
 > 要精简 plist 的话，先去有 17~26 运行时的机器上补齐这两组验证。
@@ -410,16 +448,17 @@ open ExternalDisplayDemo.xcodeproj
 
   顺带用 `xcrun devicectl device info displays` 确认外接屏到底插没插 —— 只有 `LCD (primary)`
   时，手机上的黑屏就与外部显示器无关，别往外接屏方向查。
-- **级联效应（重要）**：app scene 挂掉会连带掐死外接屏那条路 —— `PhoneSceneBridge` 不加载 →
-  iOS 27 的 `registerSceneAccessory` 不执行 → 系统根本不给外接屏 scene → 外接屏只剩镜像，
-  镜像的又是一块黑屏。所以「外接屏白转黑」和「手机白转黑」很可能是**同一个根因**，
+- **级联效应（重要）**：声明 accessory 的那个视图没加载，就等于没注册 ——
+  手机端 app scene 挂掉会连带掐死外接屏那条路：根视图不出现 → 没有 accessory →
+  iOS 27 系统根本不给外接屏 scene → 外接屏只剩镜像（镜像的正是那块黑屏）。
+  所以「外接屏白转黑」和「手机白转黑」很可能是**同一个根因**，
   先看手机屏，不要一头扎进 `ExternalDisplaySceneDelegate`。
 
 ### 生命周期钩子的差异
 
 SwiftUI 没有 `sceneDidDisconnect` 的等价物。原 `MainSceneDelegate` 在那里调用的
 `MockExternalDisplay.shared.reset()`，这里挂在 `scenePhase` 的 `.background` 上近似，
-并在 `.active` 时用 `PhoneSceneLocator` 存的主屏 scene 重新 bootstrap ——
+并在 `.active`（以及首次 `.onAppear`）时重新 `bootstrap()` ——
 否则进一次后台，替身窗口就永久消失了。真实项目若有必须在 scene 断开时释放的资源，
 这一条要另行设计。
 
@@ -433,7 +472,25 @@ Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两�
 手机端 UI 正常；模拟器上按上面第四节（「第二个坑」）的脚本复现出同样的黑屏，
 卸载重装后恢复正常，且反复重启稳定。
 
-> **仍未实测**：真机 + HDMI 适配器的外接屏 scene 本身（当时适配器没插，`device info displays`
-> 只有主屏）。修完 app scene 之后，外接屏路径才算第一次真正具备被验证的前提 ——
-> 插上适配器后手机端应出现「已连接 1 块外接屏 + 分辨率」，届时再确认
-> `registerSceneAccessory` 从零尺寸宿主 VC（`PhoneSceneBridge`）注册是否真的生效。
+**iOS 27 的 SwiftUI accessory 路径实测（iOS 27.0 模拟器，iPhone 18 Pro）**：
+
+- 启动后 `onAvailabilityChange` 回调一次 `availability = false`（DEBUG 下打印到控制台），
+  即**注册被系统接受、可用性正确上报**。整条外接屏链路的失败模式都是「静默」，
+  这是目前无硬件时唯一能确认注册生效的信号。
+  复现：`xcrun simctl launch --console-pty <UDID> com.jove.externaldisplaydemo`，看
+  `[ExternalDisplay] scene accessory availability = …`。
+- 无外接屏时手机端显示「未检测到外接屏」；无 mock 与带 `-mockExternalDisplay` 两种启动
+  都不崩溃、无回归。
+- **交叉校验**：`ExternalDisplayRootView` 自测出的像素尺寸（视口点数 × `displayScale`）
+  与宿主按窗口矩形算出的值完全一致（都是 `1086 × 611 px`）—— 两条独立算法互为验证。
+
+> **仍未实测**：
+> 1. **真机 + HDMI 适配器的外接屏 scene 本身**从未跑过（适配器没插，`device info displays`
+>    只有主屏）。插上后手机端应出现「已连接 1 块外接屏 + 分辨率」；若仍只镜像，
+>    优先怀疑 accessory 那段 `if #available` 没生效。
+> 2. **模拟器替代不了这个验证** —— 实测 `UIScreen.screens.count == 1`：CoreSimulator
+>    虽然枚举得出一个 7680×4320 的 `Display class: 1` 端口，UIKit 侧看不到它。
+>    所以「真外接屏上到底出不出画面」在本机没有软件替代方案。
+> 3. iOS 17~26 的 plist + scene delegate 路径在本机无法实测。
+> 4. 自测量的两个前提 ——「accessory 内容铺满外接屏」与「其 `displayScale` 就是外接屏的
+>    scale」—— 都是按 API 语义推断的，同样没有画面证据。
