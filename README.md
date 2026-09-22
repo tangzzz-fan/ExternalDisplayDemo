@@ -51,11 +51,28 @@
 UIApplicationSceneManifest
 ├── UIApplicationSupportsMultipleScenes = YES      ← 必须，否则不分配外接屏 session
 └── UISceneConfigurations
-    ├── UIWindowSceneSessionRoleApplication                          → MainSceneDelegate
+    ├── UIWindowSceneSessionRoleApplication                          → 空壳条目（见下）
     └── UIWindowSceneSessionRoleExternalDisplayNonInteractive        → ExternalDisplaySceneDelegate
 ```
 
-两个易错点：
+三个易错点：
+
+- **application role 的条目必须留，但不能带 `UISceneDelegateClassName`**。
+  本项目主界面走 SwiftUI `WindowGroup`，scene delegate 由 SwiftUI 自己装，
+  所以这条只需要一个空壳占位：
+
+  ```xml
+  <key>UIWindowSceneSessionRoleApplication</key>
+  <array>
+    <dict>
+      <key>UISceneConfigurationName</key>
+      <string>Phone Scene</string>
+    </dict>
+  </array>
+  ```
+
+  删掉它（"反正 SwiftUI 自己管"）会**黑屏且零日志**，详见第八节。
+  反过来给它写上 delegate class，则会与 SwiftUI 的 delegate 冲突。
 
 - `UISceneDelegateClassName` 必须**模块限定**：`$(PRODUCT_MODULE_NAME).ExternalDisplaySceneDelegate`。
   写错的表现和上面一样 —— 静默镜像。用 `plutil -p` 检查构建产物里的 Info.plist 确认展开正确：
@@ -90,7 +107,7 @@ func sceneDidDisconnect(_ scene: UIScene) { window = nil }
 
 ### 3. iOS 27+：注册 scene accessory
 
-见 `Sources/App/PhoneRootViewController.swift`：
+见 `Sources/App/PhoneSceneBridge.swift`：
 
 ```swift
 if #available(iOS 27.0, *) {
@@ -287,14 +304,14 @@ open ExternalDisplayDemo.xcodeproj
 
 ---
 
-## 八、纯 SwiftUI 生命周期变体
+## 八、为什么主界面走 SwiftUI 原生生命周期
 
-本节描述 **`pure-swiftui` 分支**。`main` 上那套 `AppDelegate` + `MainSceneDelegate` +
-`PhoneRootViewController` 三层派发，在这里换成 SwiftUI 原生生命周期。
+本项目最初是 `AppDelegate` + `MainSceneDelegate` + `PhoneRootViewController` 三层派发，
+现已改为 SwiftUI 原生生命周期。本节记录改造范围，以及过程中最容易踩的那个坑。
 
 ### 能换掉什么、换不掉什么
 
-| | `main` | `pure-swiftui` |
+| | 改造前（AppDelegate 派发） | 现在（SwiftUI App 派发） |
 | --- | --- | --- |
 | `@main` | `AppDelegate` | `ExternalDisplayDemoApp: App` |
 | 主屏 scene | `MainSceneDelegate` | `WindowGroup` |
