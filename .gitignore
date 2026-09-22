@@ -18,3 +18,7 @@ ExternalDisplayDemo.xcodeproj/
 
 # 临时调试产物（截图等）
 .scratch/
+
+# Agent 工作日志（仅本地保留，不随仓库发布）
+.workbuddy-ai/
+.workbuddy/
