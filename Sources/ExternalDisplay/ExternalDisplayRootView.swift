@@ -3,14 +3,19 @@ import SwiftUI
 
 /// 外接屏上渲染的根视图。
 ///
-/// 它被 `ExternalDisplaySceneDelegate` 通过 `UIHostingController` 挂到
-/// 外接屏的 `UIWindow` 上。除了承载它的 window 之外，这个视图和普通
-/// SwiftUI 视图没有任何区别。
+/// 它有三个宿主，内容完全相同：
+/// - **iOS 17~26**：`ExternalDisplaySceneDelegate` 经 `UIHostingController` 挂到外接屏的 `UIWindow`；
+/// - **iOS 27+**：`ExternalNonInteractiveAccessory`（见 `ExternalDisplayAccessory`），由系统呈现；
+/// - **无硬件时**：`MockExternalDisplay` 在手机屏上叠的替身窗口。
+///
+/// 所以它不依赖任何宿主专有的东西 —— **分辨率也由它自己量出来**（视口点数 × 屏幕 scale），
+/// 而不是等宿主传进来。这样上面三条路一份代码，且不需要 UIKit 的 `UIScreen` / `windowScene`。
 ///
 /// ## 为什么这里一个手势都没有
 /// 外接屏的 role 是 `windowExternalDisplayNonInteractive` —— 系统不会向它投递
 /// 任何触摸事件（真机上 `window.isUserInteractionEnabled = false`，模拟器 mock 里
-/// `PassthroughWindow.hitTest` 恒返回 `nil`）。
+/// `PassthroughWindow.hitTest` 恒返回 `nil`），SwiftUI 的 accessory 更是在 API 层面
+/// 就叫 `ExternalNonInteractiveAccessory`。
 ///
 /// 所以这个视图是**纯输出**的：它只读 `RemoteControl` 的共享状态，
 /// 滚动 / 缩放 / 光标全部由手机端的遥控板写入。在这里加 `ScrollView`
@@ -20,8 +25,15 @@ import SwiftUI
 /// 4K 外接屏、以及模拟器的 letterbox 小窗口里都不会溢出或截断。
 struct ExternalDisplayRootView: View {
 
-    /// 由 scene delegate 从 `windowScene.screen.nativeBounds` 传入。
-    let resolution: String
+    /// 内容量出自己的**像素**尺寸后回调。
+    ///
+    /// 只有 iOS 27 的 accessory 路径需要它 —— 那条路没有 scene delegate，
+    /// 也就没有 `UIWindowScene` 可查，手机端的连接状态只能由这里上报。
+    /// 另外两条路的宿主自己就能拿到更准的 nativeBounds，都传 `nil`。
+    var onMetricsChange: ((_ pixelSize: CGSize, _ nativeScale: CGFloat) -> Void)?
+
+    /// 外接屏自己的缩放比：accessory 内容读到的就是这个 window 所在屏幕的值。
+    @Environment(\.displayScale) private var displayScale
 
     private let store = DisplayContentStore.shared
     private let remote = RemoteControl.shared
@@ -58,10 +70,35 @@ struct ExternalDisplayRootView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .clipped()
+            .onAppear { reportMetrics(geometry.size) }
+            .onChange(of: geometry.size) { _, size in reportMetrics(size) }
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
         .onChange(of: remote.tapCount) { _, _ in playRipple() }
+    }
+
+    // MARK: - 自测量
+
+    /// 视口点数 × 屏幕 scale 即为像素尺寸。
+    ///
+    /// 不使用 `UIScreen`：`UIScreen.screens` / `didConnectNotification` 在 iOS 16 已废弃，
+    /// `UIScreen.main` 在 iOS 26 已废弃，而 SwiftUI 的 accessory 内容本来也拿不到 `windowScene`。
+    private func pixelSize(for viewport: CGSize) -> CGSize {
+        CGSize(
+            width: (viewport.width * displayScale).rounded(),
+            height: (viewport.height * displayScale).rounded()
+        )
+    }
+
+    private func resolutionText(for viewport: CGSize) -> String {
+        let size = pixelSize(for: viewport)
+        return "\(Int(size.width)) × \(Int(size.height)) px"
+    }
+
+    private func reportMetrics(_ viewport: CGSize) {
+        guard let onMetricsChange, viewport.width > 0, viewport.height > 0 else { return }
+        onMetricsChange(pixelSize(for: viewport), displayScale)
     }
 
     // MARK: - 可滚动内容
@@ -94,7 +131,7 @@ struct ExternalDisplayRootView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
 
-            Text(resolution + " px")
+            Text(resolutionText(for: metrics.viewport))
                 .font(.system(size: metrics.base * 0.038, weight: .medium, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.7))
         }
@@ -227,5 +264,5 @@ private struct ScrollMetrics {
 }
 
 #Preview {
-    ExternalDisplayRootView(resolution: "1920 × 1080")
+    ExternalDisplayRootView()
 }

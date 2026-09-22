@@ -11,9 +11,11 @@ import Observation
 /// 独立的 `UISceneSession`，并回调对应 scene delegate。
 ///
 /// ## 数据来源的单一性
-/// 本类的所有写入都来自 `ExternalDisplaySceneDelegate` 的挂载/卸载回调
-/// （外加 `Debug/MockExternalDisplay.swift` 的模拟挂载），
-/// 因此这里的 `attachments` 与系统实际状态不会出现分叉。
+/// 本类的所有写入都来自三条互斥的挂载链，因此这里的 `attachments` 与系统实际状态
+/// 不会出现分叉：
+/// - **iOS 17~26**：`ExternalDisplaySceneDelegate`（plist 自动连接，能读到 `windowScene.screen`）；
+/// - **iOS 27+**：`ExternalDisplayAccessory` 的 `onAvailabilityChange` + 内容自报尺寸；
+/// - **无硬件时**：`Debug/MockExternalDisplay.swift` 的模拟挂载。
 @MainActor
 @Observable
 final class ExternalDisplayMonitor {
@@ -46,6 +48,7 @@ final class ExternalDisplayMonitor {
     }
 
     private static let mockID = "mock-external-display"
+    private static let accessoryID = "scene-accessory"
 
     private init() {}
 
@@ -66,6 +69,36 @@ final class ExternalDisplayMonitor {
 
     func detach(_ sessionID: String) {
         attachments.removeAll { $0.id == sessionID }
+    }
+
+    // MARK: - iOS 27 的 SwiftUI accessory
+
+    /// 由外接屏那份内容自报尺寸后调用（它量不出正确尺寸前不要调用）。
+    ///
+    /// 与 `attach(_:)` 的区别只是「分辨率从哪来」：这条路没有 `UIWindowScene`。
+    func attachAccessory(pixelSize: CGSize, nativeScale: CGFloat) {
+        let attachment = Attachment(
+            id: Self.accessoryID,
+            resolution: Self.describe(pixelSize, scale: nativeScale),
+            pixelSize: pixelSize,
+            nativeScale: nativeScale,
+            source: .physical
+        )
+        attachments.removeAll { $0.id == Self.accessoryID }
+        attachments.append(attachment)
+    }
+
+    /// 系统告知 accessory 可用性变化。
+    ///
+    /// 变得不可用时立刻撤下；变得可用时**不在这里挂** ——
+    /// 此时内容还没量出自己的尺寸，等它的 `onMetricsChange` 上报后再挂。
+    func setAccessoryAvailable(_ isAvailable: Bool) {
+        guard !isAvailable else { return }
+        detachAccessory()
+    }
+
+    func detachAccessory() {
+        attachments.removeAll { $0.id == Self.accessoryID }
     }
 
     // MARK: - 模拟外接屏（仅由 MockExternalDisplay 调用）

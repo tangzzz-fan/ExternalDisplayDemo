@@ -74,11 +74,7 @@ final class MockExternalDisplay {
         mockWindow.layer.borderWidth = 4
         mockWindow.layer.borderColor = UIColor.systemOrange.withAlphaComponent(0.8).cgColor
         mockWindow.clipsToBounds = true
-        mockWindow.rootViewController = UIHostingController(
-            rootView: ExternalDisplayRootView(
-                resolution: "\(Int(rect.width * scale)) × \(Int(rect.height * scale))"
-            )
-        )
+        mockWindow.rootViewController = UIHostingController(rootView: ExternalDisplayRootView())
         mockWindow.isHidden = false
         window = mockWindow
 

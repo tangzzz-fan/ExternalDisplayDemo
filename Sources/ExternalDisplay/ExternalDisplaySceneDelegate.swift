@@ -8,8 +8,8 @@ import SwiftUI
 /// - **iOS 17 ~ 26**：只要 `Support/Info.plist` 里声明了
 ///   `UIWindowSceneSessionRoleExternalDisplayNonInteractive`，
 ///   屏幕一接入系统就自动建立 session 并回调到这里。
-/// - **iOS 27 起**：该系统行为被移除。应用必须先通过
-///   `PhoneRootViewController` 注册 `UISceneAccessory`，系统才会连接本 scene。
+/// - **iOS 27 起**：该系统行为被移除。应用必须先注册 scene accessory，系统才会连接本 scene ——
+///   见 `PhoneSceneBridge.BridgeViewController.registerExternalDisplayAccessory()`。
 ///   仅靠 Info.plist 声明在 iOS 27+ 上不再生效，表现为「插上屏只镜像、不扩展」。
 ///
 /// 触发场景：有线接入 USB-C / Lightning 转 HDMI 适配器、AirPlay 投送、
@@ -34,14 +34,11 @@ final class ExternalDisplaySceneDelegate: UIResponder, UIWindowSceneDelegate {
 
         // 外接屏上不能再用 UIScreen.main / UIScreen.screens（均已废弃），
         // 屏幕信息一律从当前 windowScene 拿。
-        let screen = windowScene.screen
-
+        //
+        // iOS 27 起这个 delegate 不会被调用（那条路改由 SwiftUI 的 scene accessory 走，
+        // 见 `ExternalDisplayAccessory`），这里只服务 iOS 17~26。
         let window = UIWindow(windowScene: windowScene)
-        window.rootViewController = UIHostingController(
-            rootView: ExternalDisplayRootView(
-                resolution: "\(Int(screen.nativeBounds.width)) × \(Int(screen.nativeBounds.height))"
-            )
-        )
+        window.rootViewController = UIHostingController(rootView: ExternalDisplayRootView())
         // 该 role 本身不接收触摸事件（非交互屏），这里显式写出来只是表明语义。
         window.isUserInteractionEnabled = false
 
