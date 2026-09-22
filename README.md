@@ -128,13 +128,16 @@ ExternaldisplayDemo/
     │   ├── AppDelegate.swift                      @main，只承载生命周期
     │   ├── MainSceneDelegate.swift                手机屏 scene
     │   ├── PhoneRootViewController.swift          手机端 UI 宿主 + scene accessory 注册
-    │   └── PhoneRootView.swift                    状态面板 + 推送内容控制
+    │   ├── PhoneRootView.swift                    状态面板 + 推送内容控制
+    │   ├── RemoteControlPad.swift                 手机端遥控板（手势采集）
+    │   └── RemoteControlDock.swift                底部常驻遥控台（safeAreaInset 宿主）
     ├── Core/
     │   ├── ExternalDisplayMonitor.swift           连接状态记录（@Observable）
-    │   └── DisplayContentStore.swift              手机 / 外接屏共享内容状态
+    │   ├── DisplayContentStore.swift              共享内容状态（「选什么」）
+    │   └── RemoteControl.swift                    共享交互状态（「怎么看」）
     ├── ExternalDisplay/
     │   ├── ExternalDisplaySceneDelegate.swift     ★ 接入落点
-    │   ├── ExternalDisplayRootView.swift          外接屏根视图
+    │   ├── ExternalDisplayRootView.swift          外接屏根视图（纯输出，无手势）
     │   └── DisplayPatternCanvas.swift             逐帧渲染验证
     └── Debug/
         └── MockExternalDisplay.swift              模拟器替身（不参与真机链路）
@@ -143,9 +146,67 @@ ExternaldisplayDemo/
 数据流：手机端改 `DisplayContentStore` → 外接屏 `ExternalDisplayRootView` 自动重绘。
 两侧是**同一进程内的两个 UIScene，共享内存**，不需要任何跨进程通道。
 
+内容与交互拆成两份状态，各自职责单一：
+
+| 状态 | 回答的问题 | 写入方 | 读取方 |
+| --- | --- | --- | --- |
+| `DisplayContentStore` | 外接屏**显示什么** | 手机端表单 | `ExternalDisplayRootView` |
+| `RemoteControl` | 外接屏**怎么看**（滚动 / 缩放 / 光标） | 手机端遥控板手势 | `ExternalDisplayRootView` |
+
 ---
 
-## 四、运行
+## 四、交互：外接屏收不到触摸，怎么办
+
+**结论：外接屏自己不能滚动，也不接受任何手势。** 两个独立原因，任一条都足以让它失效：
+
+1. **role 本身就是非交互的**。`windowExternalDisplayNonInteractive` 明确不接收触摸，
+   `ExternalDisplaySceneDelegate` 里的 `window.isUserInteractionEnabled = false` 只是把语义写出来。
+2. **模拟器 mock 同样收不到**。`PassthroughWindow.hitTest` 恒返回 `nil`，触摸全部穿透到下层窗口。
+
+所以在外接屏的视图树里加 `ScrollView` 或 `.gesture` 是**无效的** —— 手势根本到不了那里。
+外接屏是纯输出设备，一切输入都必须从手机侧中继。
+
+本工程的做法：手机端加一块遥控板，手势在手机侧采集，经 `RemoteControl` 单向送到外接屏渲染视图。
+
+```
+   手机端手势                   共享状态                    外接屏渲染
+RemoteControlPad   ──写──▶   RemoteControl    ──读──▶  ExternalDisplayRootView
+  DragGesture                 scroll / zoom             .offset(y:)
+  MagnifyGesture              pointer / tapCount        .scaleEffect()
+```
+
+| 手势 | 手机端采集 | 外接屏响应 |
+| --- | --- | --- |
+| 单指拖动 | `DragGesture`，逐帧增量归一化 | 内容列按 `scroll` 偏移；手指落点画成橙色光标环 |
+| 双指捏合 | `MagnifyGesture` | 图案画布 `.scaleEffect(zoom)` |
+| 轻点 | 按钮 | 光标处扩散一次涟漪 |
+
+三个实现要点：
+
+- **存归一化值，不存像素位移**。外接屏可能是 1080p / 4K / 模拟器里 362×203pt 的 letterbox
+  小窗口，尺寸差一个数量级。`RemoteControl.scroll` 存 `0...1` 的进度，外接屏侧用
+  `ScrollMetrics` 按自身内容高度换算实际位移，同一份手机端状态在哪块屏上都成立。
+- **拖拽增量要自己算**。`DragGesture` 的 `translation` 是**累计值**，直接当增量用会让滚动速度
+  随拖拽时长不断放大，必须减掉上一次的值。`MagnifyGesture` 的 `magnification` 同理。
+- **`.frame()` 不指定对齐会居中**。滚动内容高度（本工程约 446pt）远超视口（约 203pt），
+  `.frame(width:height:)` 默认居中会把内容上移半个差值 —— 表现是「滚动起点就少了两条内容」。
+  必须写 `alignment: .topLeading`，再靠 `.clipped()` 裁掉溢出。
+
+> **验证边界**：`xcrun simctl` 没有触摸注入 API，Xcode 27 的模拟器 GUI（DeviceHub）也没有
+> 可脚本化的设备窗口，所以「手势 → 状态」这半条链路在本机无法自动化验证，需手动在模拟器里拖一下。
+> 「状态 → 渲染」这半条已用临时插桩验证过（`scroll = 0.62` / `zoom = 1.9` / `pointer = (0.3, 0.35)`）：
+> 可见内容恰为条目 04（顶部被切）～11，光标环实测落点 `(109.5, 70.8)pt`，与计算值 `(108.6, 71.0)pt` 一致。
+>
+> **手势归属靠结构保证，不靠运气**。触控板最初放在 `Form` 里，它的 `DragGesture` 会与外层
+> 滚动视图的竖向 pan 手势竞争 —— 而 SwiftUI **没有**能压过祖先 `ScrollView` 的公开 API
+> （`highPriorityGesture` 只影响当前视图与其子视图）。现在改由 `RemoteControlDock` 经
+> `.safeAreaInset(edge: .bottom)` 挂在滚动区域**之外**，归属没有歧义，
+> 顺带省掉了「要先滚动才能摸到遥控板」这一步。遥控台默认收起只留读数栏，
+> 展开才铺开触控板 —— 这样它和模拟外接屏窗口能同时看见。
+
+---
+
+## 五、运行
 
 ### 生成工程
 
@@ -161,7 +222,17 @@ open ExternalDisplayDemo.xcodeproj
 
 它会在手机屏 scene 上叠一个 16:9 的 letterbox 窗口，挂载**与外接屏完全相同**的
 `ExternalDisplayRootView`，同时登记为 `source == .mock` 的 attachment。
-手机端会多出一个「显示模拟外接屏」开关，随时可以收起它去操作表单。
+手机端会多出一个「显示模拟外接屏」开关。
+
+该窗口浮在 `.normal + 1` 层、永远盖在主窗口之上，所以它**主动避开屏幕底部 96pt**
+（`letterboxedRect` 里的 `reservedBottom`）—— 那块留给常驻的遥控台，
+否则展开遥控台时两者会在屏幕中段互相遮挡。
+
+这个窗口是 `PassthroughWindow`（`hitTest` 恒返回 `nil`），触摸会穿透到下层窗口，
+所以**不收起它也能正常操作表单**，只是视觉上被那块黑框盖住。
+
+滚动 / 缩放 / 光标这些交互见第四节 —— 外接屏收不到触摸，一律由手机端的
+「遥控外接屏」面板驱动。
 
 可选参数：`-mockExternalDisplayAspect=4:3`（或写成 `-mockExternalDisplayAspect 4:3`）改宽高比。
 
@@ -175,7 +246,7 @@ open ExternalDisplayDemo.xcodeproj
 
 ---
 
-## 五、踩坑清单
+## 六、踩坑清单
 
 1. **`UIRequiresFullScreen = YES`** → iPhone 直接失去外部显示器能力。
 2. **`UIApplicationSupportsMultipleScenes` 忘了开** → 系统不分配外接屏 session。
@@ -186,10 +257,19 @@ open ExternalDisplayDemo.xcodeproj
 6. **外接屏窗口调 `makeKeyAndVisible()`** → 抢走手机屏的 key 状态。
 7. **忘了在 `sceneDidDisconnect` 释放 window** → 残留无人持有的渲染面。
 8. 模拟器里 `UIScreen.screens` 永远只有主屏 —— 这是模拟器限制，不是代码问题。
+9. **在外接屏视图上加 `ScrollView` / `.gesture`** → 永远不触发。role 非交互，手势到不了
+   那棵视图树；必须从手机侧中继（见第四节）。
+10. **滚动内容的 `.frame` 没写 `alignment: .topLeading`** → 内容比视口高时会被居中，
+    表现是「滚动起点凭空少了两条内容」，且滚到底也差一截。
+11. **把带 `DragGesture` 的触控板放进 `Form` / `ScrollView`** → 与外层滚动视图的竖向 pan
+    手势竞争，而 SwiftUI 没有能压过祖先 `ScrollView` 的公开 API。必须挂到滚动区域之外
+    （`.safeAreaInset`），或换成承载 `UIPanGestureRecognizer` 的 `UIViewRepresentable`。
+12. **让浮层窗口与底部常驻 UI 抢位置** → 替身窗口在 `.normal + 1` 层永远盖住主窗口，
+    必须主动为底部面板预留空间（见第五节），否则展开时会遮住面板标题栏。
 
 ---
 
-## 六、迁到真实项目
+## 七、迁到真实项目
 
 - **换成视频/Metal 渲染**：把 `DisplayPatternCanvas` 的 `Canvas` 换成承载 `MTKView` /
   `AVPlayerLayer` 的 `UIViewRepresentable`。scene 接入层（`ExternalDisplaySceneDelegate`
@@ -198,5 +278,7 @@ open ExternalDisplayDemo.xcodeproj
   区分，为每块屏各建一个 window 即可。
 - **只在部分页面投屏**：把注册/注销跟着页面生命周期走
   （`registerSceneAccessory` / `unregisterSceneAccessory`）。
+- **外接屏要能交互**：非交互 role 下只能走手机侧中继（本工程的 `RemoteControlPad` +
+  `RemoteControl`）。真需要外接屏自己接收触摸，得改用 iPad 台前调度那条 interactive 路径。
 - **本 demo 刻意没做的**：交互式外接屏（iPad 台前调度把应用窗口搬到外接屏）、
   自定义分辨率协商、外接屏音频路由。

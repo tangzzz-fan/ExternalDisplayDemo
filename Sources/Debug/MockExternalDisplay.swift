@@ -97,14 +97,28 @@ final class MockExternalDisplay {
     // MARK: - Helpers
 
     /// 在容器内按给定宽高比居中摆放，多出来的方向留黑边。
+    ///
+    /// 底部预留 `reservedBottom`：手机屏底部常驻着遥控台（`RemoteControlDock`），
+    /// 而替身窗口浮在 `.normal + 1` 层、永远盖在主窗口之上，不主动避开的话
+    /// 展开遥控台时两者会在屏幕中段互相遮挡。
     private static func letterboxedRect(in container: CGRect, aspect: CGFloat) -> CGRect {
         guard container.width > 0, container.height > 0, aspect > 0 else { return container }
-        if container.width / container.height > aspect {
-            let width = container.height * aspect
-            return CGRect(x: container.midX - width / 2, y: container.minY, width: width, height: container.height)
+
+        let reservedBottom: CGFloat = 96
+        let available = CGRect(
+            x: container.minX,
+            y: container.minY,
+            width: container.width,
+            height: max(container.height - reservedBottom, 0)
+        )
+        guard available.height > 0 else { return container }
+
+        if available.width / available.height > aspect {
+            let width = available.height * aspect
+            return CGRect(x: available.midX - width / 2, y: available.minY, width: width, height: available.height)
         } else {
-            let height = container.width / aspect
-            return CGRect(x: container.minX, y: container.midY - height / 2, width: container.width, height: height)
+            let height = available.width / aspect
+            return CGRect(x: available.minX, y: available.midY - height / 2, width: available.width, height: height)
         }
     }
 
