@@ -38,8 +38,18 @@ final class RemoteControl {
     /// 画面缩放倍率。
     private(set) var zoom: CGFloat = 1
 
+    /// 光标当前由谁驱动。外接屏据此换渲染样式：
+    /// 触控板画环形光标，空鼠画激光。
+    enum PointerSource: String {
+        case touch
+        case airMouse
+    }
+
     /// 手机端手指在外接屏上的归一化落点（0...1）；`nil` 表示光标不在屏上。
     private(set) var pointer: CGPoint?
+
+    /// 光标的当前归属。空鼠与触控板共用同一个落点，谁在动谁说了算。
+    private(set) var pointerSource: PointerSource = .touch
 
     /// 轻点计数。外接屏侧靠它的变化触发一次涟漪反馈。
     private(set) var tapCount: Int = 0
@@ -73,8 +83,24 @@ final class RemoteControl {
     // MARK: - 光标
 
     /// 更新外接屏上的光标位置，入参为归一化坐标。
-    func movePointer(to point: CGPoint?) {
+    ///
+    /// - Parameter source: 本次写入的来源。传 `nil` 则沿用上一次的来源，
+    ///   只有 `point != nil` 时才改写归属 —— 清空光标不该顺手把归属也改掉。
+    func movePointer(to point: CGPoint?, source: PointerSource? = nil) {
         pointer = point.map { CGPoint(x: Self.clamp($0.x, 0, 1), y: Self.clamp($0.y, 0, 1)) }
+        if pointer != nil, let source {
+            pointerSource = source
+        }
+    }
+
+    /// 清空光标（空鼠停止时调用），归属保持不变。
+    func clearPointer() {
+        pointer = nil
+    }
+
+    /// 记录一条来自空鼠的离散事件，手机端读数栏直读。
+    func noteAirMouseEvent(_ text: String) {
+        lastEvent = text
     }
 
     // MARK: - 缩放
@@ -103,6 +129,7 @@ final class RemoteControl {
         scroll = 0
         zoom = 1
         pointer = nil
+        pointerSource = .touch
         lastEvent = "已复位"
     }
 

@@ -16,6 +16,7 @@ struct PhoneRootView: View {
             Form {
                 statusSection
                 contentSection
+                AirMouseDiagnostics()
                 if MockExternalDisplay.isEnabled {
                     debugSection
                 }
@@ -107,7 +108,7 @@ struct PhoneRootView: View {
     private var hintSection: some View {
         Section {
             Text("外接屏上的内容是同一进程内的另一个 UIScene，共享内存，无需任何跨进程通道。")
-            Text("外接屏的 role 是非交互的（`windowExternalDisplayNonInteractive`），系统不向它投递触摸事件，所以它自己无法滚动。底部遥控台在手机侧采集手势，经 `RemoteControl` 单向送到外接屏。")
+            Text("外接屏的 role 是非交互的（`windowExternalDisplayNonInteractive`），系统不向它投递触摸事件，所以它自己无法滚动。底部遥控台在手机侧采集输入，经 `RemoteControl` 单向送到外接屏：触控板用拖动，空鼠用手机姿态驱动激光指针。")
         }
         .font(.footnote)
         .foregroundStyle(.secondary)

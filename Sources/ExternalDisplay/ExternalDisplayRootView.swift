@@ -37,10 +37,22 @@ struct ExternalDisplayRootView: View {
 
     private let store = DisplayContentStore.shared
     private let remote = RemoteControl.shared
+    private let airMouse = AirMouse.shared
 
     /// 轻点反馈的涟漪。
     @State private var rippleScale: CGFloat = 0.35
     @State private var rippleOpacity: Double = 0
+
+    /// 激光拖尾：最近若干个归一化落点，越靠后越淡越小。
+    ///
+    /// 拖尾必须存在视图侧而不是 `RemoteControl` 里 —— 它是纯渲染状态，
+    /// 让共享模型为了画一条尾巴而保存历史位置，是把表现层的事漏进了状态层。
+    @State private var laserTrail: [CGPoint] = []
+    /// 扳机触发时的瞄准环回弹。
+    @State private var reticleScale: CGFloat = 1
+
+    /// 拖尾保留的采样点数。空鼠 60 Hz，10 个点约 0.17 s，视觉上刚好"有余晖"。
+    private static let laserTrailLength = 10
 
     /// 可滚动内容的行数，决定滚动距离。
     private let rowCount = 14
@@ -64,7 +76,7 @@ struct ExternalDisplayRootView: View {
 
                 hud(metrics: metrics)
 
-                pointerRing(metrics: metrics)
+                pointer(metrics: metrics)
 
                 ripple(metrics: metrics)
             }
@@ -75,7 +87,9 @@ struct ExternalDisplayRootView: View {
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
-        .onChange(of: remote.tapCount) { _, _ in playRipple() }
+        .onChange(of: remote.tapCount) { _, _ in playTapFeedback() }
+        .onChange(of: remote.pointerSource) { _, _ in laserTrail.removeAll() }
+        .onChange(of: remote.pointer) { _, point in appendToLaserTrail(point) }
     }
 
     // MARK: - 自测量
@@ -178,6 +192,13 @@ struct ExternalDisplayRootView: View {
                 .font(.system(size: metrics.base * 0.032, weight: .medium, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.55))
+
+            if let text = airMouseHudText {
+                Text(text)
+                    .font(.system(size: metrics.base * 0.032, weight: .medium, design: .monospaced))
+                    .monospacedDigit()
+                    .foregroundStyle(LaserPalette.core.opacity(0.85))
+            }
         }
         .padding(metrics.base * 0.06)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -186,34 +207,154 @@ struct ExternalDisplayRootView: View {
 
     // MARK: - 光标与轻点反馈
 
-    private func pointerRing(metrics: ScrollMetrics) -> some View {
-        Group {
-            if let pointer = remote.pointer {
-                let diameter = metrics.base * 0.1
-                ZStack {
-                    Circle().fill(Color.orange.opacity(0.22))
-                    Circle().stroke(Color.orange, lineWidth: max(1.5, metrics.base * 0.007))
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: diameter * 0.18, height: diameter * 0.18)
-                }
-                .frame(width: diameter, height: diameter)
-                .position(
-                    x: pointer.x * metrics.viewport.width,
-                    y: pointer.y * metrics.viewport.height
-                )
-                .shadow(color: .black.opacity(0.6), radius: metrics.base * 0.015)
+    /// 光标渲染按归属分派：触控板画环形光标，空鼠画激光。
+    ///
+    /// 两者共用 `RemoteControl.pointer` 这一个落点，只是外观不同 ——
+    /// 这样"谁在动"就完全由 `pointerSource` 决定，不需要两套坐标互相同步。
+    @ViewBuilder
+    private func pointer(metrics: ScrollMetrics) -> some View {
+        if let pointer = remote.pointer {
+            switch remote.pointerSource {
+            case .touch:
+                touchCursor(at: pointer, metrics: metrics)
+            case .airMouse:
+                laserCursor(at: pointer, metrics: metrics)
             }
         }
     }
 
+    // MARK: 触控板光标
+
+    private func touchCursor(at pointer: CGPoint, metrics: ScrollMetrics) -> some View {
+        let diameter = metrics.base * 0.1
+        return ZStack {
+            Circle().fill(LaserPalette.touch.opacity(0.22))
+            Circle().stroke(LaserPalette.touch, lineWidth: max(1.5, metrics.base * 0.007))
+            Circle()
+                .fill(LaserPalette.touch)
+                .frame(width: diameter * 0.18, height: diameter * 0.18)
+        }
+        .frame(width: diameter, height: diameter)
+        .position(point(pointer, in: metrics))
+        .shadow(color: .black.opacity(0.6), radius: metrics.base * 0.015)
+    }
+
+    // MARK: 激光光标
+
+    /// 激光指针：拖尾 + 光晕 + 白芯光斑 + 瞄准环。
+    ///
+    /// 后三层各自独立 `.position`，都落在与外层 `ZStack` 同一坐标系里。
+    /// **不要**把它们再套一层 ZStack 后整体 position —— 内层已经用绝对坐标定位，
+    /// 再套一层会二次偏移。拖尾是铺满视口的 `Canvas`，自己按归一化坐标换算，
+    /// 同样不参与这条 `.position` 约定。
+    @ViewBuilder
+    private func laserCursor(at pointer: CGPoint, metrics: ScrollMetrics) -> some View {
+        let unit = metrics.base * 0.1
+        let center = point(pointer, in: metrics)
+
+        // 1. 拖尾
+        laserTrailCanvas(metrics: metrics)
+
+        // 2. 光晕
+        Circle()
+            .fill(
+                RadialGradient(
+                    colors: [
+                        LaserPalette.core.opacity(0.7),
+                        LaserPalette.glow.opacity(0.2),
+                        LaserPalette.core.opacity(0)
+                    ],
+                    center: .center,
+                    startRadius: 0,
+                    endRadius: unit * 0.95
+                )
+            )
+            .frame(width: unit * 1.9, height: unit * 1.9)
+            .position(center)
+
+        // 3. 光斑本体：红边包白芯，白芯是"过曝"的部分
+        Circle()
+            .fill(LaserPalette.core)
+            .frame(width: unit * 0.4, height: unit * 0.4)
+            .overlay {
+                Circle()
+                    .fill(.white)
+                    .frame(width: unit * 0.16, height: unit * 0.16)
+            }
+            .shadow(color: LaserPalette.core.opacity(0.9), radius: unit * 0.22)
+            .position(center)
+
+        // 4. 瞄准环 + 四向刻度
+        reticle(unit: unit)
+            .position(center)
+    }
+
+    /// 拖尾：一条渐细渐淡的折线，从尾到头收敛到当前光斑。
+    ///
+    /// 用**单张 `Canvas` 一次描完**，而不是给每个采样点各挂一个带 `.blur` 的
+    /// `Circle`。拖尾随光标每帧重算，而空鼠是 60 Hz；10 个模糊图层意味着外接屏
+    /// 每个采样周期都要重新合成 10 次离屏模糊 —— 在 4K 外接屏上是实打实的掉帧源。
+    /// 描边一次就没有这层开销，且省掉了每段的布局抖动。
+    private func laserTrailCanvas(metrics: ScrollMetrics) -> some View {
+        let unit = metrics.base * 0.1
+        let points = laserTrail.map { point($0, in: metrics) }
+
+        return Canvas { context, _ in
+            guard points.count >= 2 else { return }
+
+            for index in 1..<points.count {
+                // 0（最早）→ 1（最新）
+                let progress = CGFloat(index) / CGFloat(points.count - 1)
+
+                var path = Path()
+                path.move(to: points[index - 1])
+                path.addLine(to: points[index])
+
+                context.stroke(
+                    path,
+                    with: .color(LaserPalette.core.opacity(Double(progress * progress) * 0.55)),
+                    style: StrokeStyle(
+                        lineWidth: unit * 0.24 * progress,
+                        lineCap: .round,
+                        lineJoin: .round
+                    )
+                )
+            }
+        }
+        .frame(width: metrics.viewport.width, height: metrics.viewport.height)
+        .allowsHitTesting(false)
+    }
+
+    private func reticle(unit: CGFloat) -> some View {
+        let diameter = unit * 0.95
+        return ZStack {
+            Circle()
+                .stroke(LaserPalette.core.opacity(0.6), lineWidth: max(1, unit * 0.02))
+
+            ForEach(0..<4, id: \.self) { index in
+                Capsule()
+                    .fill(LaserPalette.core.opacity(0.8))
+                    .frame(width: max(1, unit * 0.016), height: unit * 0.14)
+                    // 先位移再旋转：offset 不改变布局框，rotationEffect 仍绕
+                    // ZStack 中心转，于是四根刻度均匀落在环外。
+                    .offset(y: -(diameter / 2 + unit * 0.1))
+                    .rotationEffect(.degrees(Double(index) * 90))
+            }
+        }
+        .frame(width: diameter, height: diameter)
+        .scaleEffect(reticleScale)
+        .shadow(color: LaserPalette.core.opacity(0.5), radius: unit * 0.08)
+    }
+
+    // MARK: 涟漪
+
     private func ripple(metrics: ScrollMetrics) -> some View {
-        let center = remote.pointer.map {
-            CGPoint(x: $0.x * metrics.viewport.width, y: $0.y * metrics.viewport.height)
-        } ?? CGPoint(x: metrics.viewport.width / 2, y: metrics.viewport.height / 2)
+        let center = remote.pointer.map { point($0, in: metrics) }
+            ?? CGPoint(x: metrics.viewport.width / 2, y: metrics.viewport.height / 2)
+        let color = remote.pointerSource == .airMouse ? LaserPalette.core : LaserPalette.touch
 
         return Circle()
-            .stroke(Color.orange, lineWidth: max(2, metrics.base * 0.01))
+            .stroke(color, lineWidth: max(2, metrics.base * 0.01))
             .frame(width: metrics.base * 0.22, height: metrics.base * 0.22)
             .scaleEffect(rippleScale)
             .opacity(rippleOpacity)
@@ -221,14 +362,70 @@ struct ExternalDisplayRootView: View {
             .allowsHitTesting(false)
     }
 
-    private func playRipple() {
+    // MARK: 反馈与拖尾
+
+    private func playTapFeedback() {
         rippleScale = 0.35
         rippleOpacity = 0.9
         withAnimation(.easeOut(duration: 0.55)) {
             rippleScale = 2.0
             rippleOpacity = 0
         }
+        // 瞄准环先弹开再收回，给扳机一个"咔哒"的视觉对应
+        withAnimation(.spring(response: 0.26, dampingFraction: 0.42)) {
+            reticleScale = 1.45
+        }
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.6).delay(0.08)) {
+            reticleScale = 1
+        }
     }
+
+    /// 拖尾只在空鼠驱动光标时累积；切回触控板立刻清空。
+    private func appendToLaserTrail(_ normalized: CGPoint?) {
+        guard remote.pointerSource == .airMouse, let normalized else {
+            if !laserTrail.isEmpty { laserTrail.removeAll() }
+            return
+        }
+        laserTrail.append(normalized)
+        if laserTrail.count > Self.laserTrailLength {
+            laserTrail.removeFirst()
+        }
+    }
+
+    // MARK: - 几何与文案
+
+    private func point(_ normalized: CGPoint, in metrics: ScrollMetrics) -> CGPoint {
+        CGPoint(
+            x: normalized.x * metrics.viewport.width,
+            y: normalized.y * metrics.viewport.height
+        )
+    }
+
+    /// 空鼠状态行。未启动时不占地方，故障状态则必须显示 ——
+    /// 否则眼镜屏上什么都看不到，手机端又不在眼前，用户无从判断。
+    private var airMouseHudText: String? {
+        switch airMouse.state {
+        case .idle, .stopped:
+            return nil
+        case .warming:
+            return "空鼠预热中…"
+        case .tracking:
+            if airMouse.warmup.isSynthetic { return "空鼠 模拟源" }
+            guard let usable = airMouse.warmup.milestones.usable else { return "空鼠 就绪" }
+            return String(format: "空鼠 可用 %.2fs", usable)
+        case .noSamples:
+            return "空鼠 无数据"
+        case .unavailable:
+            return "空鼠 不可用"
+        }
+    }
+}
+
+/// 光标配色。触控板沿用原来的橙色，空鼠用红色激光系。
+private enum LaserPalette {
+    static let core = Color(red: 1.0, green: 0.21, blue: 0.25)
+    static let glow = Color(red: 1.0, green: 0.45, blue: 0.28)
+    static let touch = Color.orange
 }
 
 /// 外接屏内容的滚动几何。

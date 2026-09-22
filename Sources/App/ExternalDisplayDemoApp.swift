@@ -36,6 +36,12 @@ struct ExternalDisplayDemoApp: App {
                 .onAppear {
                     // 首次挂载就走一次，不依赖 scenePhase 的初始跳变。
                     MockExternalDisplay.shared.bootstrap()
+
+                    // 与 `-mockExternalDisplay` 同一约定：带了 mock 参数就直接进入该模式，
+                    // 否则这个参数要用户手动点开遥控台 → 切到空鼠 → 点启动才生效。
+                    if MockAirMouseSource.isEnabled {
+                        AirMouse.shared.start()
+                    }
                 }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -47,6 +53,10 @@ struct ExternalDisplayDemoApp: App {
                 // SwiftUI 没有 `sceneDidDisconnect` 的等价物，用进后台近似。
                 // 真实项目若有必须在 scene 断开时释放的资源，这里要另行设计。
                 MockExternalDisplay.shared.reset()
+
+                // 空鼠必须在这里停：CoreMotion 的数据流在后台会继续跑并持续耗电，
+                // 而"瞄准"这件事只在应用可见时才有意义 —— 没人看着的屏幕不需要指针。
+                AirMouse.shared.stop()
             default:
                 break
             }

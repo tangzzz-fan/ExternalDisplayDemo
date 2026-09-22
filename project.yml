@@ -46,6 +46,7 @@ schemes:
       config: Debug
       commandLineArguments:
         "-mockExternalDisplay": false
+        "-mockAirMouse": false
     test:
       config: Debug
     profile:
