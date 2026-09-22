@@ -285,6 +285,10 @@ open ExternalDisplayDemo.xcodeproj
 13. **SwiftUI `App` 生命周期下，把 `UIWindowSceneSessionRoleApplication` 从
     `UISceneConfigurations` 里删掉** → app scene 连不上，**纯黑屏、零日志**。
     该条目必须留，但不能带 `UISceneDelegateClassName`。详见第八节。
+14. **改掉某个 role 的 `UISceneDelegateClassName`（尤其是删掉那个委托类）之后覆盖安装** →
+    系统恢复上一次安装持久化下来的 `UISceneSession`，里面**存着旧委托类**；旧类已经不在
+    二进制里 → 该 role 拿不到可用委托 → **启动屏白屏转纯黑屏**，进程存活、不崩溃、**零日志**。
+    **覆盖安装不会自愈**，必须卸载重装。复现与排查见第八节末。
 
 ---
 
@@ -356,6 +360,48 @@ open ExternalDisplayDemo.xcodeproj
 所以最终形态：application role 留一个只有 `UISceneConfigurationName` 的空壳条目，
 external role 保持原样。
 
+### ★ 第二个坑：改了 scene 宿主后**覆盖安装**也是黑屏
+
+改造完成、代码全部正确，模拟器也验证过了，但**真机上仍然白屏转黑屏**。同一个根因的第二种触发方式，
+和上面那条互为镜像：
+
+- **现象**：启动时先是启动屏（白），随即整屏纯黑；进程存活、不崩溃、**日志里没有任何 error**。
+  同一份代码在模拟器上正常。
+- **原因**：系统会把 `UISceneSession`（**含它的 `UISceneConfiguration` 与委托类**）
+  **持久化在 app 的数据容器里**，下次启动直接**恢复**。改造前 application role 的委托类是
+  `MainSceneDelegate`，这次改造把它删了 —— 覆盖安装后恢复出来的会话指向一个**已经不存在的类**，
+  于是 app scene 没有可用委托、没有 window。**代码怎么写都救不回来。**
+- **判据**：覆盖安装不会自愈。**卸载重装即恢复**，这就是结论本身。
+- **模拟器 100% 复现**（不需要真机）：
+
+  ```sh
+  SIM=<已启动的模拟器 UDID>; BID=com.jove.externaldisplaydemo
+  OLD=.scratch/verify/DD-release/Build/Products/Release-iphonesimulator/ExternalDisplayDemo.app  # 任意「改造前」的构建
+  NEW=.scratch/DD-sim/Build/Products/Debug-iphonesimulator/ExternalDisplayDemo.app
+
+  xcrun simctl uninstall $SIM $BID
+  xcrun simctl install   $SIM "$OLD" && xcrun simctl launch $SIM $BID   # 先让系统存下旧会话
+  xcrun simctl install   $SIM "$NEW" && xcrun simctl launch $SIM $BID   # 覆盖安装 → 黑屏
+  xcrun simctl uninstall $SIM $BID
+  xcrun simctl install   $SIM "$NEW" && xcrun simctl launch $SIM $BID   # 卸载重装 → 正常
+  ```
+
+- **排查手段：截图比 lldb 省事。** 真机上 `xcrun lldb -b -o 'device process attach -p <pid>'`
+  实测**没能挂上**（随后 `process interrupt` 报 `Process must be launched`），
+  而截图一眼就能定性：
+
+  ```sh
+  xcrun devicectl device capture screenshot --device <UDID> --destination /tmp/x.png
+  xcrun simctl io <SIM-UDID> screenshot /tmp/x.png
+  ```
+
+  顺带用 `xcrun devicectl device info displays` 确认外接屏到底插没插 —— 只有 `LCD (primary)`
+  时，手机上的黑屏就与外部显示器无关，别往外接屏方向查。
+- **级联效应（重要）**：app scene 挂掉会连带掐死外接屏那条路 —— `PhoneSceneBridge` 不加载 →
+  iOS 27 的 `registerSceneAccessory` 不执行 → 系统根本不给外接屏 scene → 外接屏只剩镜像，
+  镜像的又是一块黑屏。所以「外接屏白转黑」和「手机白转黑」很可能是**同一个根因**，
+  先看手机屏，不要一头扎进 `ExternalDisplaySceneDelegate`。
+
 ### 生命周期钩子的差异
 
 SwiftUI 没有 `sceneDidDisconnect` 的等价物。原 `MainSceneDelegate` 在那里调用的
@@ -369,3 +415,12 @@ SwiftUI 没有 `sceneDidDisconnect` 的等价物。原 `MainSceneDelegate` 在�
 Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两种启动都实跑截图确认
 （替身窗口正常挂载 / 「未检测到外接屏」正常显示）。iOS 17~26 的旧路径在本机无法实测
 （只有 iOS 27 运行时）。
+
+覆盖安装黑屏这一条已实机验证：iPhone 16 Pro（iOS 27）上先卸载再装当前构建，
+手机端 UI 正常；模拟器上按上面第四节（「第二个坑」）的脚本复现出同样的黑屏，
+卸载重装后恢复正常，且反复重启稳定。
+
+> **仍未实测**：真机 + HDMI 适配器的外接屏 scene 本身（当时适配器没插，`device info displays`
+> 只有主屏）。修完 app scene 之后，外接屏路径才算第一次真正具备被验证的前提 ——
+> 插上适配器后手机端应出现「已连接 1 块外接屏 + 分辨率」，届时再确认
+> `registerSceneAccessory` 从零尺寸宿主 VC（`PhoneSceneBridge`）注册是否真的生效。
