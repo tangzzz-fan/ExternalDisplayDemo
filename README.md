@@ -51,15 +51,18 @@
 UIApplicationSceneManifest
 ├── UIApplicationSupportsMultipleScenes = YES      ← 必须，否则不分配外接屏 session
 └── UISceneConfigurations
-    ├── UIWindowSceneSessionRoleApplication                          → 空壳条目（见下）
+    ├── UIWindowSceneSessionRoleApplication                          → 空壳条目（可有可无，见下）
     └── UIWindowSceneSessionRoleExternalDisplayNonInteractive        → ExternalDisplaySceneDelegate
 ```
 
 三个易错点：
 
-- **application role 的条目必须留，但不能带 `UISceneDelegateClassName`**。
-  本项目主界面走 SwiftUI `WindowGroup`，scene delegate 由 SwiftUI 自己装，
-  所以这条只需要一个空壳占位：
+- **真正必需的是 external role 那一条**，它是 iOS 17~26「plist 自动连接外接屏」的唯一声明处。
+  application role 那条只是本项目保留下来的惰性占位：
+  **实测（iOS 27）删掉它、甚至把整块 `UISceneConfigurations` 删掉，SwiftUI 都照常启动**，
+  详见第八节的对照表。
+
+  本项目当前保留一个空壳条目：
 
   ```xml
   <key>UIWindowSceneSessionRoleApplication</key>
@@ -71,8 +74,8 @@ UIApplicationSceneManifest
   </array>
   ```
 
-  删掉它（"反正 SwiftUI 自己管"）会**黑屏且零日志**，详见第八节。
-  反过来给它写上 delegate class，则会与 SwiftUI 的 delegate 冲突。
+  它**不能**带 `UISceneDelegateClassName` —— 本项目主界面走 SwiftUI `WindowGroup`，
+  scene delegate 由 SwiftUI 自己装，写上会与之冲突。
 
 - `UISceneDelegateClassName` 必须**模块限定**：`$(PRODUCT_MODULE_NAME).ExternalDisplaySceneDelegate`。
   写错的表现和上面一样 —— 静默镜像。用 `plutil -p` 检查构建产物里的 Info.plist 确认展开正确：
@@ -282,9 +285,11 @@ open ExternalDisplayDemo.xcodeproj
     （`.safeAreaInset`），或换成承载 `UIPanGestureRecognizer` 的 `UIViewRepresentable`。
 12. **让浮层窗口与底部常驻 UI 抢位置** → 替身窗口在 `.normal + 1` 层永远盖住主窗口，
     必须主动为底部面板预留空间（见第五节），否则展开时会遮住面板标题栏。
-13. **SwiftUI `App` 生命周期下，把 `UIWindowSceneSessionRoleApplication` 从
-    `UISceneConfigurations` 里删掉** → app scene 连不上，**纯黑屏、零日志**。
-    该条目必须留，但不能带 `UISceneDelegateClassName`。详见第八节。
+13. ~~**SwiftUI `App` 生命周期下，把 `UIWindowSceneSessionRoleApplication` 从
+    `UISceneConfigurations` 里删掉** → app scene 连不上，**纯黑屏、零日志**。~~
+    **这条已实测推翻**（见第八节）：`UISceneConfigurations` 整块在 SwiftUI 生命周期下都不是必需的，
+    application role 的空壳条目可有可无。当时看到的黑屏是**第 14 条**那类持久化会话问题，
+    与 plist 少没少那条无关。当前 plist 里保留它只是惰性选择。
 14. **改掉某个 role 的 `UISceneDelegateClassName`（尤其是删掉那个委托类）之后覆盖安装** →
     系统恢复上一次安装持久化下来的 `UISceneSession`，里面**存着旧委托类**；旧类已经不在
     二进制里 → 该 role 拿不到可用委托 → **启动屏白屏转纯黑屏**，进程存活、不崩溃、**零日志**。
@@ -341,24 +346,32 @@ open ExternalDisplayDemo.xcodeproj
 它是根视图 `.background` 里一个零尺寸、`allowsHitTesting(false)` 的
 `UIViewControllerRepresentable`，不参与布局。
 
-### ★ 踩到的坑：只声明 external role 会黑屏
+### ★ 曾经的误会：application role 那条空壳条目其实不是必需的
 
-把 `UISceneConfigurations` 里的 `UIWindowSceneSessionRoleApplication` 条目删掉之后，
-应用启动是**纯黑屏**：进程存活、无崩溃报告、**日志里一个 error 都没有**。
-把根视图换成一个纯色（`Color.red`）依然黑屏 —— 说明与视图层无关，是 app scene 压根没连上
-（黑屏其实是 `UILaunchScreen` 没被替换掉）。
+改造过程中曾记录：把 `UISceneConfigurations` 里的 `UIWindowSceneSessionRoleApplication`
+条目删掉后应用启动**纯黑屏**（进程存活、无崩溃报告、**零 error**），于是把该条目当成必需项保留了下来。
 
-规则是：
+**后续实测推翻了这条结论。** 同一台机器、iOS 27.0 模拟器，每组都先 `uninstall` 排除会话残留：
 
-- `UISceneConfigurations` 字典**存在**时，必须包含 `UIWindowSceneSessionRoleApplication`
-  条目，否则 app scene 连不上（本坑）；
-- 但该条目**不能**带 `UISceneDelegateClassName`，否则会与 SwiftUI 自己装的
-  scene delegate 冲突；
-- 若把整个 `UISceneConfigurations` 字典删掉，SwiftUI 反而正常 ——
-  代价是 iOS 17~26 的「plist 自动连接外接屏」那条路也没了。
+| Info.plist 形态 | 干净安装 | 覆盖安装 |
+| --- | --- | --- |
+| A：application 空壳条目 + external role（当前形态） | 正常 | 正常 |
+| B：只留 external role（**删掉 application 条目**） | **正常** | 正常 |
+| C：整块 `UISceneConfigurations` 都不写 | **正常** | 正常 |
 
-所以最终形态：application role 留一个只有 `UISceneConfigurationName` 的空壳条目，
-external role 保持原样。
+结论：**SwiftUI 生命周期下 `UISceneConfigurations` 整块都不是必需的**，application role 那条
+空壳条目更是可有可无。当时看到的黑屏与下一节是同一类问题 —— 那一刻正好把 `MainSceneDelegate`
+删了，覆盖安装恢复了指向旧委托类的会话，**与 plist 里少没少那条无关**。
+
+所以现在这个形态是「惰性保留」，不是「必须这么写」：
+
+- application role 留一个只有 `UISceneConfigurationName` 的空壳条目 —— **无用但无害**；
+- external role 那条**必须留** —— 它是 **iOS 17~26**「plist 自动连接外接屏」的唯一声明处。
+  iOS 27 起这条路失效、改由 `registerSceneAccessory` 负责，且那里已显式给了 `delegateClass`，
+  原则上可省；但本工程 deployment target 是 17.0，所以保留。
+
+> **仍未验证**：本机只有 iOS 27.0 运行时，变体 B/C 在 **iOS 17~26** 上是否同样正常没测过。
+> 要精简 plist 的话，先去有 17~26 运行时的机器上补齐这两组验证。
 
 ### ★ 第二个坑：改了 scene 宿主后**覆盖安装**也是黑屏
 
