@@ -389,8 +389,8 @@ open ExternalDisplayDemo.xcodeproj
 
   ```sh
   SIM=<已启动的模拟器 UDID>; BID=com.jove.externaldisplaydemo
-  OLD=.scratch/verify/DD-release/Build/Products/Release-iphonesimulator/ExternalDisplayDemo.app  # 任意「改造前」的构建
-  NEW=.scratch/DD-sim/Build/Products/Debug-iphonesimulator/ExternalDisplayDemo.app
+  OLD=<改造前那版代码的 .app 路径>   # 需先 checkout 到改造前的 commit 构建一次
+  NEW=<当前代码的 .app 路径>
 
   xcrun simctl uninstall $SIM $BID
   xcrun simctl install   $SIM "$OLD" && xcrun simctl launch $SIM $BID   # 先让系统存下旧会话
