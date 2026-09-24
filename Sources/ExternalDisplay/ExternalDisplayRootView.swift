@@ -23,11 +23,12 @@ import SwiftUI
 ///
 /// ## 层次
 /// ```
-/// StarfieldBackdrop        最底层，固定不动；内容下拉让出上半屏时它才露出来
-/// └ contentColumn          内容容器，整体随 scroll/pull 上下位移
+/// StarfieldBackdrop        最底层，固定不动；幕墙半透，缝里看到的就是它
+/// └ contentColumn          幕墙：一块半透光的板，整体随 scroll/pull/lateral 位移
 ///   ├ hero                 图案 canvas（帧驱动演示）+ 标题
 ///   └ WaterfallColumnView  瀑布流卡片
 /// ├ hud                    固定，不参与滚动
+/// ├ backButton             固定，浮在板上（不随幕墙位移，否则按不到）
 /// ├ pointer / ripple       固定，跟随手机端光标
 /// ```
 ///
@@ -70,6 +71,13 @@ struct ExternalDisplayRootView: View {
     /// 全部一次性建出来。这个量级没问题，上百张得自己写回收池。
     private static let itemCount = 36
 
+    /// 瀑布流列数。
+    ///
+    /// 取值与理由见 `WaterfallMetrics.wallColumns` —— 定义在那里是为了让验收
+    /// 脚本能取到**同一个数**。列数若在这里与脚本里各写一份，脚本断言的
+    /// 就是另一套列宽，而它在截图上完全看不出来。
+    private static let columnCount = WaterfallMetrics.wallColumns
+
     /// 卡片数据。固定种子 → 每次启动的高度与配色完全一致，
     /// 逐状态截图对比才有意义。
     private static let items = WaterfallItem.demoItems(count: itemCount)
@@ -99,14 +107,17 @@ struct ExternalDisplayRootView: View {
 
             ZStack(alignment: .topLeading) {
                 StarfieldBackdrop(
-                    pull: remote.pull,
+                    dolly: exposure,
                     tilt: parallaxTilt,
+                    isMoving: exposure > 0,
                     isAnimated: store.isAnimated
                 )
 
                 contentColumn(plan)
 
                 hud(plan)
+
+                backButton(plan)
 
                 pointer(plan)
 
@@ -123,7 +134,7 @@ struct ExternalDisplayRootView: View {
             .onChange(of: geometry.size) { _, size in reportMetrics(size) }
             // 挂在 GeometryReader **内部**：选中判定要问 `plan` 当前命中的是哪一张卡，
             // 而 `plan` 是这一层闭包里的局部值，外层拿不到。
-            .onChange(of: remote.tapCount) { _, _ in toggleSelection(in: plan) }
+            .onChange(of: remote.tapCount) { _, _ in handleTap(in: plan) }
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
@@ -145,15 +156,17 @@ struct ExternalDisplayRootView: View {
         let waterfall: WaterfallMetrics
         let layout: WaterfallLayout
         let scroll: ScrollMetrics
+        let lateral: LateralMetrics
         let heroHeight: CGFloat
         let focus: WaterfallFocus
+        let backButton: BackButtonGeometry
 
         init(viewport: CGSize) {
             let base = min(viewport.width, viewport.height)
             let waterfall = WaterfallMetrics(
                 base: base,
                 viewport: viewport,
-                columns: WaterfallMetrics.columnCount(for: viewport)
+                columns: ExternalDisplayRootView.columnCount
             )
             let layout = WaterfallLayout.make(items: ExternalDisplayRootView.items, metrics: waterfall)
             let heroHeight = ExternalDisplayRootView.heroHeight(for: viewport, inset: waterfall.inset)
@@ -162,6 +175,7 @@ struct ExternalDisplayRootView: View {
             self.waterfall = waterfall
             self.layout = layout
             self.heroHeight = heroHeight
+            self.lateral = LateralMetrics(viewport: viewport)
             // 内容总高 = hero + 间距 + 瀑布流。上下内边距由 ScrollMetrics 自己加。
             self.scroll = ScrollMetrics(
                 viewport: viewport,
@@ -182,6 +196,9 @@ struct ExternalDisplayRootView: View {
                 ),
                 placements: layout.placements
             )
+            // 固定层，不随幕墙位移 —— 它是"浮在板上面"的控件，
+            // 跟着板一起被推走就成了板的装饰，而不是一个能按的按钮。
+            self.backButton = BackButtonGeometry(viewport: viewport)
         }
     }
 
@@ -210,21 +227,61 @@ struct ExternalDisplayRootView: View {
 
     // MARK: - 内容容器
 
-    /// 内容容器：正常铺满视口，下拉时整体下移、顶边浮起圆角，
-    /// 变成浮在星海之上的一张卡片。
+    /// 幕墙"浮起来"的程度：三条轴里被推开最多的那一条。
     ///
-    /// 两个几何动作叠加在同一次 `.offset` 里（`pullOffset - scrollOffset`），
-    /// 而这两段位移分别取自 `RemoteControl` 里同一个标量的正负两段，不会互相污染。
+    /// 它只负责"这块板离开了原位多少"这一件事 —— 投影、四角圆角强度、
+    /// 星海的相机推进都按它走。三条轴的位移方向各不相同，但"离开原位多少"
+    /// 是一致的：横推露出的左侧星海，与下拉露出的上半屏，
+    /// 是同一块板浮起来的两面。
+    ///
+    /// 计算挪进了纯函数 `wallExposure`，好让"三向过卷 → 曝光量"这条规则
+    /// 进得了验收脚本（见 `DisplayScrollGeometry.swift`）。
+    private var exposure: CGFloat {
+        wallExposure(pull: remote.pull, bottomPull: remote.bottomPull, lateral: remote.lateral)
+    }
+
+    /// 幕墙这一帧的整体位移：纵向（滚动 / 下拉 / 上拉）与横向（推开）相加。
+    ///
+    /// 单独抽成方法是因为它有**两个**消费方 —— 容器的 `.offset` 与命中判定
+    /// （`WaterfallFocus`）。之前命中只吃纵向那一个分量，横向一动就会点到邻卡；
+    /// 让两处共用同一个来源，才能保证"画在哪"与"点到哪"永远是同一个位移。
+    private func contentOffset(in plan: DisplayPlan) -> CGSize {
+        CGSize(
+            width: plan.lateral.offset(for: remote.lateral),
+            height: plan.scroll.contentOffset(
+                scroll: remote.scroll,
+                pull: remote.pull,
+                bottomPull: remote.bottomPull
+            )
+        )
+    }
+
+    /// 内容容器：正常铺满视口；任一侧被推开时整体位移、那一侧浮起圆角，
+    /// 变成浮在星海之上的一张半透光的板。
+    ///
+    /// 三个几何动作叠加在同一次 `.offset` 里（纵向三段 + 横向一段），
+    /// 而它们分别取自 `RemoteControl` 里互不干扰的两条权威轴，不会互相污染。
+    ///
+    /// ## 材质
+    /// 底板半透、卡片半透，两者都由 `WallMaterial` 定。这是需求 R1 / R6
+    /// 的落点：列间距那条缝要看得到星海。代价与取舍记在那个类型的文档里。
     ///
     /// ## 左右边距在瀑布流内部就成立了
     /// 列排布区比视口窄，居中放置后两侧各让出 `horizontalInset` ——
     /// 这件事完全由 `WaterfallColumnView` 自己完成，这里不必为它做任何事。
+    /// 现在那两侧的留白也归底板管，于是同样透光。
     ///
-    /// `clipShape` 保留，但职责已经与横向留白无关：它管的是滚出视口的内容
-    /// 和下拉时浮起的那个顶边圆角。
+    /// `clipShape` 的职责有两个：把滚出视口的内容裁掉，以及画出浮板
+    /// **四角各自**的圆角（见 `WallShape`）。它不再与横向留白有关。
     private func contentColumn(_ plan: DisplayPlan) -> some View {
-        let pull = remote.pull
-        let cornerRadius = plan.scroll.cornerRadius(for: pull, base: plan.base)
+        let exposure = self.exposure
+        let offset = contentOffset(in: plan)
+        let radii = WallRadii.forExposure(
+            pull: remote.pull,
+            bottomPull: remote.bottomPull,
+            lateral: remote.lateral,
+            radius: plan.scroll.cornerRadius(base: plan.base)
+        )
         let viewport = plan.scroll.viewport
 
         return VStack(alignment: .leading, spacing: plan.waterfall.inset) {
@@ -238,18 +295,20 @@ struct ExternalDisplayRootView: View {
         }
         .padding(.vertical, plan.waterfall.inset)
         // 容器宽度**锁死**为视口宽。父级 VStack 拿到的宽度一旦被子视图撑宽，
-        // 圆角、阴影、下拉位移都会跟着跑偏。
+        // 圆角、投影、位移都会跟着跑偏。
         .frame(width: viewport.width, alignment: .top)
-        // 容器背景必须不透明：下拉让出的上半屏要露出星海，若容器透光，
-        // 星海会从卡片缝隙里透上来，背景墙的"墙"就立不住了。
-        .background(Color(red: 0.004, green: 0.005, blue: 0.014))
-        .clipShape(TopRoundedRect(cornerRadius: cornerRadius))
+        // 底板**半透**（`WallMaterial.plateOpacity`）：列间距那条缝里透出来的
+        // 是星海，不是底色。这与最初那条注释（"容器背景必须不透明，否则星海
+        // 从卡片缝隙透上来，墙就立不住了"）正好相反，是需求明确反转的一条决定 ——
+        // 幕墙从"挡住星海的墙"变成"浮在星海之上的玻璃板"。
+        .background(WallMaterial.plate.opacity(WallMaterial.plateOpacity))
+        .clipShape(WallShape(radii: radii))
         .shadow(
-            color: .black.opacity(Double(pull) * 0.7),
-            radius: plan.base * 0.05 * pull,
-            y: plan.base * 0.012 * pull
+            color: .black.opacity(Double(exposure) * 0.7),
+            radius: plan.base * 0.05 * exposure,
+            y: plan.base * 0.012 * exposure
         )
-        .offset(y: plan.scroll.contentOffset(scroll: remote.scroll, pull: pull))
+        .offset(offset)
     }
 
     /// hero 区：帧驱动图案 + 标题 + 分辨率。
@@ -320,6 +379,44 @@ struct ExternalDisplayRootView: View {
         .shadow(color: .black.opacity(0.6), radius: plan.base * 0.02)
     }
 
+    // MARK: - 返回按钮
+
+    /// 左上角的返回按钮。
+    ///
+    /// ## 为什么是浮动圆，而不是一条栏
+    /// 需求里有一条明确的否命题：**不能形成一条拦截的横线**。
+    /// 一条铺满屏宽的不透明栏会把幕墙切成两段 —— 上沿露出的星海与幕墙本体
+    /// 被那条栏隔开，看起来像两个不相干的区域。所以这里只画一个圆：
+    /// 四周透出去的都是幕墙本身，它只是浮在板上的一枚控件。
+    ///
+    /// ## 命中不靠 SwiftUI
+    /// 外接屏收不到触摸（见类型文档），所以 `.allowsHitTesting(false)` 是如实声明：
+    /// 按钮的"按下"由手机端指针落点 + 轻点事件驱动，判定在
+    /// `BackButtonGeometry.contains(_:)` 里，优先级高于卡片。
+    @ViewBuilder
+    private func backButton(_ plan: DisplayPlan) -> some View {
+        let geometry = plan.backButton
+        let isFocused = focusedBackButton(in: plan)
+
+        ZStack {
+            // 只垫一层薄暗。垫厚了就等于又造了一条"栏"，正是要避开的东西。
+            Circle().fill(.black.opacity(0.35))
+
+            Circle()
+                .stroke(
+                    isFocused ? Color.white.opacity(0.80) : Color.white.opacity(0.28),
+                    lineWidth: max(1, plan.base * (isFocused ? 0.006 : 0.003))
+                )
+
+            Image(systemName: "chevron.left")
+                .font(.system(size: geometry.diameter * 0.42, weight: .semibold))
+                .foregroundStyle(.white.opacity(isFocused ? 0.95 : 0.72))
+        }
+        .frame(width: geometry.diameter, height: geometry.diameter)
+        .position(geometry.center)
+        .allowsHitTesting(false)
+    }
+
     private var readout: String {
         var parts = [
             "滚动 \(Int(remote.scroll * 100))%",
@@ -327,6 +424,12 @@ struct ExternalDisplayRootView: View {
         ]
         if remote.pull > 0 {
             parts.append("下拉 \(Int(remote.pull * 100))%")
+        }
+        if remote.bottomPull > 0 {
+            parts.append("上拉 \(Int(remote.bottomPull * 100))%")
+        }
+        if remote.lateral != 0 {
+            parts.append("横向 \(Int(remote.lateral * 100))%")
         }
         return parts.joined(separator: " · ")
     }
@@ -535,17 +638,48 @@ struct ExternalDisplayRootView: View {
     /// 纯计算、每次现算：命中结果随指针每帧变化（空鼠 60 Hz），
     /// 存进 `@State` 只会多出一份要手动同步的副本，而它没有任何跨帧语义。
     ///
+    /// 喂给命中的位移与喂给容器 `.offset` 的**是同一个值**（`contentOffset(in:)`）。
+    /// 横向推开之后这一点尤其要紧：少喂横向分量不会报错、也不会在纵向滚动时露馅，
+    /// 只在横向一动才显形 —— 表现为"指针点到的永远是隔壁那张卡"。
+    ///
     /// 指针不在屏上（`pointer == nil`）时直接返回 `nil` —— 触控板与空鼠
     /// 两条路都靠这个判断"现在没有焦点"，不需要再分模式。
     private func focusedItem(in plan: DisplayPlan) -> Int? {
         guard let pointer = remote.pointer else { return nil }
         return plan.focus.item(
             at: point(pointer, in: plan),
-            contentOffsetY: plan.scroll.contentOffset(scroll: remote.scroll, pull: remote.pull)
+            contentOffset: contentOffset(in: plan)
         )
     }
 
-    /// 轻点 / 扳机：把当前命中的卡片设为选中，再确认同一张则取消。
+    /// 指针是否落在返回按钮上。
+    ///
+    /// 与卡片命中同源：都用**视口坐标**上的指针落点。按钮在固定层，
+    /// 不随幕墙位移，所以这里**不能**减 `contentOffset` ——
+    /// 减了就变成"按钮跟着板一起被推走"，而它明明画在板上方不动。
+    private func focusedBackButton(in plan: DisplayPlan) -> Bool {
+        guard let pointer = remote.pointer else { return false }
+        return plan.backButton.contains(point(pointer, in: plan))
+    }
+
+    /// 轻点 / 扳机。
+    ///
+    /// **返回按钮优先于卡片**：按钮压在幕墙之上，指针在它里面的时候，
+    /// 底下那张卡不该抢走这次点击。按钮的判定区比卡片小得多，
+    /// 优先判它不会让卡片的命中变"粘"。
+    ///
+    /// 按钮的动作目前只记一条事件 —— "点了之后跳到哪一页"还没有定论
+    /// （见 `docs/specs/glass-wall-gesture.md` 的 D5），这一段刻意留空，
+    /// 不拿一个猜测出来的页面顶上。
+    private func handleTap(in plan: DisplayPlan) {
+        if focusedBackButton(in: plan) {
+            remote.noteBackButton()
+            return
+        }
+        toggleSelection(in: plan)
+    }
+
+    /// 把当前命中的卡片设为选中，再确认同一张则取消。
     ///
     /// 指针没落在任何卡片上时**不动选中** —— 空白处点一下不该把已经选好的东西
     /// 丢掉；而"取消"已经有"再点同一张"这条明确路径，不必再占一个手势。
@@ -593,27 +727,45 @@ enum LaserPalette {
     static let touch = Color.orange
 }
 
-/// 只有**顶边**带圆角的矩形。
+/// 四角**各自独立**圆角的矩形。
 ///
-/// 内容容器下拉时会伸出屏幕下沿，底角永远在视口之外；
-/// 用 `RoundedRectangle` 会连底角一起切，白白多两次绘制。
-private struct TopRoundedRect: Shape {
+/// 取代了当初的 `TopRoundedRect`（底角写死 0）。当年只做顶边是有理由的：
+/// 内容容器只在下拉时浮起，另外三条边永远贴着屏幕边缘或者伸到屏幕外，
+/// 圆角根本看不见，多算两个值是白算。
+///
+/// 幕墙能被四向推开之后这条前提不成立了：横推露出的那一条**竖边**整条都在屏内，
+/// 上下两个角都看得见。所以四角各算各的 —— 具体归属由 `WallRadii` 决定。
+///
+/// 四个半径都进 `animatableData`：过卷是手指逐帧驱动的连续量，
+/// 圆角必须跟着连续变化；只把其中一部分设为可动画的话，
+/// 那些没进差值链的角会阶梯式跳。
+private struct WallShape: Shape {
 
-    var cornerRadius: CGFloat
+    var radii: WallRadii
 
-    var animatableData: CGFloat {
-        get { cornerRadius }
-        set { cornerRadius = newValue }
+    var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<CGFloat, CGFloat>> {
+        get {
+            AnimatablePair(
+                AnimatablePair(radii.topLeading, radii.topTrailing),
+                AnimatablePair(radii.bottomLeading, radii.bottomTrailing)
+            )
+        }
+        set {
+            radii.topLeading = newValue.first.first
+            radii.topTrailing = newValue.first.second
+            radii.bottomLeading = newValue.second.first
+            radii.bottomTrailing = newValue.second.second
+        }
     }
 
     func path(in rect: CGRect) -> Path {
         Path(
             roundedRect: rect,
             cornerRadii: RectangleCornerRadii(
-                topLeading: cornerRadius,
-                bottomLeading: 0,
-                bottomTrailing: 0,
-                topTrailing: cornerRadius
+                topLeading: radii.topLeading,
+                bottomLeading: radii.bottomLeading,
+                bottomTrailing: radii.bottomTrailing,
+                topTrailing: radii.topTrailing
             ),
             style: .continuous
         )

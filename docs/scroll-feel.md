@@ -175,8 +175,12 @@ static func progress(raw: CGFloat) -> CGFloat {
 滚动只改 `remote.scroll` 一个数。它影响的是：
 
 - `.offset(y:)` —— 纯几何变换，**不参与布局**；
-- `StarfieldBackdrop(pull: ...)` —— 但星海只在 `pull > 0.002` 时才走 `TimelineView`，
-  正常滚动时它一帧都不画。
+- `StarfieldBackdrop(dolly:)` —— 但星海只在**任一位移轴非零**时才走 `TimelineView`，
+  正常滚动（三轴全零）时它一帧都不画。
+
+> 星海现在是**常驻可见**的（幕墙半透，缝里看到的就是它），停帧判据因此从
+> 「露出来没」改成「动没动」：静止时暂停重绘、保留最后一帧，画面照旧，
+> 帧成本回到 0。代价是静止时星星不闪。详见 `docs/devnotes/2026-09-24-glass-wall-material-back.md`。
 
 `WaterfallLayout.make(...)` 确实每帧都会重算一遍（它在 `body` 里的 `DisplayPlan` 中），
 但它是 `O(n·k)`、n = 36、k = 4 的纯函数，而且**结果逐帧相同** ——

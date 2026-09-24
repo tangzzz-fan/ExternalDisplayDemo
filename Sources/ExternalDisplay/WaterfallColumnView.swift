@@ -21,6 +21,11 @@ import SwiftUI
 /// 列排布区（`columnFieldWidth`）比视口**窄** `horizontalInset * 2`，
 /// 于是每一列都完整落在屏内，最外两列不再被屏幕边缘切开。
 /// 留白由外层那个「视口宽」的 frame 居中让出 —— 这里不做任何裁剪。
+///
+/// ## 材质：卡片是半透的
+/// 封面渐变与底栏底都乘了 `WallMaterial.cardFillOpacity`，于是卡后面隐约有星。
+/// 但**文字与描边保持实心** —— 它们画在半透填充之上，透明的是底，不是内容。
+/// 若改用整体的 `.opacity()`，文字会跟着一起淡下去，可读性先崩。
 struct WaterfallColumnView: View {
 
     let layout: WaterfallLayout
@@ -139,12 +144,14 @@ struct WaterfallColumnView: View {
                     hue: tone.hue,
                     saturation: tone.saturation * 0.85,
                     brightness: min(1, tone.brightness * 1.55)
-                ),
+                )
+                .opacity(WallMaterial.cardFillOpacity),
                 Color(
                     hue: tone.hue,
                     saturation: tone.saturation,
                     brightness: tone.brightness * 0.62
                 )
+                .opacity(WallMaterial.cardFillOpacity)
             ],
             startPoint: unitPoint(WaterfallItem.gradientStart(for: item.gradientAngle)),
             endPoint: unitPoint(WaterfallItem.gradientEnd(for: item.gradientAngle))
@@ -188,7 +195,14 @@ struct WaterfallColumnView: View {
         }
         .padding(.horizontal, metrics.base * 0.02)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(.white.opacity(item.isFeatured ? 0.10 : 0.05))
+        // 底栏也要有一层同样半透的深底。只留那 5% 白的话，卡片下半段会比上半段
+        // 透得多 —— 一块板上出现两种透光度，看起来像底栏漏画了，
+        // 而不是"玻璃卡片的底盘"。
+        .background(
+            WallMaterial.plate
+                .opacity(WallMaterial.cardFillOpacity)
+                .overlay(.white.opacity(item.isFeatured ? 0.10 : 0.05))
+        )
     }
 
     private func unitPoint(_ point: CGPoint) -> UnitPoint {

@@ -118,15 +118,18 @@ struct AirMousePad: View {
     /// 空鼠开着时的单指手势面。
     ///
     /// 落点**不**映射光标：这一栏的光标归陀螺仪管，手指再插一脚会让激光乱跳。
-    /// 所以这块面板只做两件事 —— 轻点确认、上下拖动滚动。
+    /// 所以这块面板只做两件事 —— 轻点确认、拖动推画面。
     ///
-    /// 滚动认**单指**（`.oneFinger`），与触摸板相反：手机举在手上的时候，
+    /// 位移认**单指**（`.oneFinger`），与触摸板相反：手机举在手上的时候，
     /// 腾出第二根手指去滑面板既别扭又会带歪姿态，单指是这里唯一顺手的做法。
+    /// 代价是纵向与横向都由这一根手指承担，于是必须靠**主轴锁定**分流
+    /// （见 `PadGesture`）—— 手指横着走就推幕墙、竖着走就滚动，不会一起动。
     private var gesturePad: some View {
         GesturePad(
             hints: [
                 GesturePadHint(text: "轻点面板 → 点击确认（等同扳机）"),
-                GesturePadHint(text: "单指上下拖动 → 滚动外接屏"),
+                GesturePadHint(text: "单指上下 → 滚动 / 顶部下拉 / 底部上拉"),
+                GesturePadHint(text: "单指左右 → 推开幕墙，露出星海"),
                 GesturePadHint(text: "抬手转动手机 → 移动激光", isSecondary: true)
             ],
             height: 120,

@@ -46,9 +46,18 @@ struct GesturePadHint {
 /// 瞄准的那只手没法稳定地去点一个具体控件。所以确认必须能落在**手边的任意位置**：
 /// 整块面板都是轻点目标。
 ///
-/// ## 横向分量
-/// **刻意忽略但不拦截**：斜着拖照样能滚，只是横向那段不产生位移。
-/// 若改成"只认纯竖向拖动"，斜拖会被判成手势失败，手感立刻变差。
+/// ## 两条输出轴
+/// 越过 slop 的那一帧由 `PadGesture` 锁定一条**主轴**（`|dx|` 与 `|dy|` 谁大听谁的），
+/// 本次会话余下的帧只在这一条轴上出动作：
+///
+/// - 纵轴 → 滚动 / 顶部下拉 / 底部上拉；
+/// - 横轴 → 幕墙横向推开（露出左或右侧星海）。
+///
+/// 锁定而不是"两条轴同时生效"，是为了保住原有的手感：改动之前横向是
+/// "刻意忽略但不拦截"的，等价于**隐式锁了纵轴** —— 斜着拖照样能滚。
+/// 显式锁定把这条手感完整保留，同时让横向从"被丢弃"变成"真的推得动"。
+///
+/// 平手判给纵轴，于是老用例的归属一字不变。
 struct GesturePad: View {
 
     /// 静止时显示的提示行。
@@ -92,7 +101,12 @@ struct GesturePad: View {
                     hintStack(size: size)
                 }
 
-                RemoteScrollIndicator(progress: remote.scroll, pull: remote.pull, size: size)
+                RemoteScrollIndicator(
+                    progress: remote.scroll,
+                    pull: remote.pull,
+                    bottom: remote.bottomPull,
+                    size: size
+                )
 
                 if mapsPointer, let pointer = remote.pointer {
                     Circle()
@@ -155,6 +169,8 @@ struct GesturePad: View {
                 remote.movePointer(to: point)
             case .scroll(let dy):
                 remote.scroll(by: dy)
+            case .lateral(let dx):
+                remote.lateral(by: dx)
             case .tap:
                 onTap?()
             }
@@ -162,16 +178,21 @@ struct GesturePad: View {
     }
 }
 
-/// 采集面右侧的滚动 / 下拉指示条。
+/// 采集面右侧的滚动 / 过卷指示条。
 ///
 /// - **橙色块**：滚动位置，从上往下走，与外接屏上的内容进度一一对应；
-/// - **青色条**：下拉露出的背景墙高度，从顶端往下画，方向与橙色块相反。
+/// - **青色条**：过卷量。下拉时从顶端往下画、上拉时从底端往上画 ——
+///   外接屏上露出的星海在哪一侧，条就画在哪一侧。
 ///
-/// 两者同框对照，手指往哪边拽、外接屏发生什么，一眼能对上。
+/// 三者同框对照，手指往哪边拽、外接屏发生什么，一眼能对上。
+///
+/// 横推量不在这里画：它是一条**竖**向的量，塞进这条竖条里只能靠颜色再区分一次，
+/// 而右上角的读数栏本来就有数字。加一个方向标记的收益不值那一份歧义。
 struct RemoteScrollIndicator: View {
 
     let progress: CGFloat
     let pull: CGFloat
+    let bottom: CGFloat
     let size: CGSize
 
     var body: some View {
@@ -179,14 +200,21 @@ struct RemoteScrollIndicator: View {
         let knobHeight: CGFloat = 30
         let travel = max(0, size.height - knobHeight - 16)
         let x = size.width - trackWidth - 10
-        let maxPullLength = size.height * 0.5
+        let maxOverScroll = size.height * 0.5
 
         return ZStack(alignment: .topLeading) {
             if pull > 0 {
                 Capsule()
                     .fill(Color.cyan.opacity(0.85))
-                    .frame(width: trackWidth, height: max(6, maxPullLength * pull))
+                    .frame(width: trackWidth, height: max(6, maxOverScroll * pull))
                     .offset(x: x, y: 8)
+            }
+
+            if bottom > 0 {
+                Capsule()
+                    .fill(Color.cyan.opacity(0.85))
+                    .frame(width: trackWidth, height: max(6, maxOverScroll * bottom))
+                    .offset(x: x, y: size.height - 8 - max(6, maxOverScroll * bottom))
             }
 
             Capsule()

@@ -24,11 +24,18 @@ import Foundation
 /// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay -remoteState pointer=0.3:0.35
 /// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay \
 ///     -remoteState pointer=0.3:0.4,selected=7
+/// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay -remoteState lateral=-1
+/// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay -remoteState bottom=1
 /// ```
 ///
 /// `selected` 写的是 `RemoteControl.selectedItemID`（瀑布流卡片的选中态）。
 /// 它本该由外接屏那侧的命中判定写回，这里直接预置是为了绕开"没有触摸注入 API
 /// 就点不动卡片"这个限制 —— 与 `pointer` 合起来就能截出「hover」与「选中」两态。
+///
+/// `lateral` 是横向推程（`-1` 最左、`+1` 最右），`bottom` 是底部上拉进度 ——
+/// 两者都是"三条位移轴"里靠手势才能到达的状态，同样必须先能预置，
+/// 否则幕墙推到边缘时的几何（有没有被推出屏外、那几个角的圆角对不对）
+/// 就只剩肉眼看一遍。
 ///
 /// 也支持 `-remoteState pull=0.5` 这种不带 `=` 的写法（与 `-mockExternalDisplayAspect`
 /// 的解析保持一致）。
@@ -57,6 +64,8 @@ enum MockRemoteState {
     struct State: Equatable {
         var scroll: CGFloat?
         var pull: CGFloat?
+        var bottom: CGFloat?
+        var lateral: CGFloat?
         var zoom: CGFloat?
         var pointer: CGPoint?
         var selectedItemID: Int?
@@ -78,6 +87,10 @@ enum MockRemoteState {
                 state.scroll = CGFloat(Double(value) ?? 0)
             case "pull":
                 state.pull = CGFloat(Double(value) ?? 0)
+            case "bottom":
+                state.bottom = CGFloat(Double(value) ?? 0)
+            case "lateral":
+                state.lateral = CGFloat(Double(value) ?? 0)
             case "zoom":
                 state.zoom = CGFloat(Double(value) ?? 1)
             case "pointer":
@@ -100,9 +113,11 @@ enum MockRemoteState {
 
     /// 把启动参数里的状态写进 `RemoteControl`。
     ///
-    /// 顺序有讲究：先 `pull` 再 `scroll`。`pull(to:)` 会清掉滚动，
+    /// 顺序有讲究：先 `pull` 再 `scroll`、最后 `bottom`。`pull(to:)` 会清掉滚动，
     /// 反过来调用则不会 —— 想要"滚动到中段**同时**下拉"这种组合态时，
-    /// 这个顺序才成立。
+    /// 这个顺序才成立。`bottom(to:)` 必须排在 `scroll` 之后，理由见调用处。
+    ///
+    /// `lateral` 与它们互不干扰（另一条轴），放在哪一步都行，位置只是为了读起来顺。
     ///
     /// 默认值写成 `nil` 再在函数体里解析，而不是 `= .shared`：
     /// 默认参数表达式在**调用方**的上下文求值，而 `.shared` 是 `@MainActor` 隔离的，
@@ -119,6 +134,14 @@ enum MockRemoteState {
         }
         if let scroll = state.scroll {
             remote.scroll(to: scroll)
+        }
+        // `bottom` 排在 `scroll` 之后：它把位置设到数轴的另一端（> 1），
+        // 先设它再设 `scroll` 会被覆盖成"滚到某个进度"。
+        if let bottom = state.bottom {
+            remote.bottomPull(to: bottom)
+        }
+        if let lateral = state.lateral {
+            remote.lateral(to: lateral)
         }
         if let zoom = state.zoom {
             remote.setZoom(zoom)

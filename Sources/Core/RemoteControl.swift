@@ -20,22 +20,24 @@ import Observation
 ///
 /// 两者都是同进程单例，外接屏侧直接读，不需要任何跨 scene 通道。
 ///
-/// ## 滚动为什么是**一个**标量而不是两个
-/// 外接屏上有两件相关但语义不同的事：
+/// ## 纵向为什么是**一个**标量而不是两个
+/// 外接屏上有几件相关但语义不同的事：
 /// - **滚动**：内容在瀑布流里往上走，`0...1`；
-/// - **下拉**：已经在顶部还继续往下拽，把内容推下去露出背景墙。
+/// - **下拉**：已经在顶部还继续往下拽，把内容推下去露出背景墙；
+/// - **上拉**：已经到底还继续往上拽，把内容拽上去露出星海。
 ///
-/// 它们看似两个维度，实际是**同一条数轴上的两段**：手指一直在往一个方向拖，
-/// 只是越过顶部之后语义变了。所以内部只留一个权威标量 `position`：
+/// 它们看似三个维度，实际是**同一条数轴上的三段**：手指一直在往一个方向拖，
+/// 只是越过两端之后语义变了。所以内部只留一个权威标量 `position`：
 ///
 /// ```
-/// position > 0  →  正常滚动进度（0 = 顶部，1 = 底部）
 /// position < 0  →  顶部下拉的超出行程
+/// 0 ... 1       →  正常滚动进度（0 = 顶部，1 = 底部）
+/// position > 1  →  底部上拉的超出行程
 /// ```
 ///
-/// 对外仍然暴露两个属性，因为渲染侧关心的是两件不同的事（内容位移 / 背景墙露出量）。
-/// 但**唯一权威只有 `position`** —— 若把它拆成两个可独立写的存储属性，
-/// 下拉时被阻尼吃掉的那部分行程，在回拉时会变成凭空多出来的滚动，手指一松内容就跳。
+/// 对外仍然暴露三个属性，因为渲染侧关心的是三件不同的事（内容位移 / 顶部露出量 /
+/// 底部露出量）。但**唯一权威只有 `position`** —— 若把它拆成三个可独立写的存储属性，
+/// 过卷时被阻尼吃掉的那部分行程，在回拉时会变成凭空多出来的滚动，手指一松内容就跳。
 @MainActor
 @Observable
 final class RemoteControl {
@@ -53,7 +55,11 @@ final class RemoteControl {
     private var position: CGFloat = 0
 
     /// 归一化滚动进度：`0` = 顶部，`1` = 底部。
-    var scroll: CGFloat { max(0, position) }
+    ///
+    /// 上限钳到 1（而不是直接取 `max(0, position)`）：进入底部上拉之后
+    /// `position` 会超过 1，若不钳住，读数栏会一直显示到 190% ——
+    /// "进度 190%" 是没有意义的，超过 100% 的那部分归 `bottomPull` 表达。
+    var scroll: CGFloat { min(max(position, 0), 1) }
 
     /// 顶部下拉进度：`0` = 没下拉，`1` = 内容顶边落到屏幕中线。
     ///
@@ -62,6 +68,31 @@ final class RemoteControl {
     var pull: CGFloat {
         PullCurve.progress(raw: -min(0, position))
     }
+
+    /// 底部上拉进度：`0` = 没上拉，`1` = 内容下沿离开屏幕下沿半个视口高。
+    ///
+    /// 与 `pull` 复用同一条 `PullCurve`：两条边是同一个动作的两端，
+    /// 手感曲线不一致的话，"往上拽比往下拽费劲"会变成一个说不清来由的差异。
+    var bottomPull: CGFloat {
+        PullCurve.progress(raw: max(0, position - 1))
+    }
+
+    /// 横向推程：`0` = 居中，`> 0` = 幕墙右移（露出左侧星海）。
+    ///
+    /// ## 为什么是**另一条**轴，而不是塞进 `position`
+    /// 纵向的 `scroll` / `pull` / `bottomPull` 是"同一条数轴上的三段"，
+    /// 所以能共用一个权威标量；横向和它们在物理上正交（手指横向位移与纵向位移
+    /// 是两件独立的事），合进同一个标量就得在每次读写时把它拆出来再接回去，
+    /// 纯属自找麻烦。
+    ///
+    /// 这也是本类第一次出现"两条平行权威量"。判据很简单：
+    /// **能不能靠一个数轴上的位置关系互相推导** —— 能就合并，不能就并列。
+    ///
+    /// 命名用 `lateral` 而不是 `x`：本类里 `x` 已经被光标坐标占了。
+    private var lateralRaw: CGFloat = 0
+
+    /// 已含阻尼的横向推程，`-1...1`。
+    var lateral: CGFloat { LateralCurve.progress(raw: lateralRaw) }
 
     /// 画面缩放倍率。
     private(set) var zoom: CGFloat = 1
@@ -111,14 +142,19 @@ final class RemoteControl {
     /// 拖动增量，`dy` 为**归一化**位移（已除以触控板高度）。
     ///
     /// 方向约定跟手指走：手指上滑 `dy < 0` → 内容上移 → 进度增大。
-    /// 越过顶部后自动转成下拉，调用方不需要自己判断边界。
+    /// 越过顶部后自动转成下拉、越过底部后自动转成上拉，调用方不需要自己判断边界。
     func scroll(by dy: CGFloat) {
         guard dy != 0 else { return }
-        let next = min(max(position - dy, -PullCurve.rawLimit), 1)
+        let next = min(
+            max(position - dy, -PullCurve.rawLimit),
+            1 + PullCurve.rawLimit
+        )
 
-        // 只在下拉真正开始的那一刻记一次事件，避免逐帧刷屏
+        // 只在过卷真正开始的那一刻记一次事件，避免逐帧刷屏
         if next < 0, position >= 0 {
             lastEvent = "下拉露出背景墙"
+        } else if next > 1, position <= 1 {
+            lastEvent = "上拉露出星海"
         }
         position = next
     }
@@ -148,6 +184,44 @@ final class RemoteControl {
             : "收起背景墙"
     }
 
+    /// 直接落到某个底部上拉进度（`0...1`），供调试预置使用。
+    ///
+    /// 与 `pull(to:)` 对称，但它落在数轴的**另一端**：先顶到 `position = 1`（滚到底），
+    /// 再往上加超出行程。`scroll(to:)` 钳在 `0...1`，所以做不出这个状态 ——
+    /// 这不是缺陷，而是"滚动进度"与"过卷行程"本来就该分开表达。
+    func bottomPull(to value: CGFloat) {
+        position = 1 + PullCurve.rawValue(forProgress: Self.clamp(value, 0, 1))
+        lastEvent = value > 0
+            ? "上拉 \(Int(bottomPull * 100))%"
+            : "收起星海"
+    }
+
+    // MARK: - 横向推开
+
+    /// 横向拖动增量，`dx` 为**归一化**位移（已除以采集面宽度）。
+    ///
+    /// 方向约定跟着手指走：手指右滑 `dx > 0` → 幕墙右移 → 露出**左侧**星海。
+    /// 与纵向 `scroll(by:)` 的符号习惯相反（那边手指上滑是负增量），
+    /// 原因是纵向送的是"进度增量"、横向送的是"位移本身"，两者本来就不是一种量。
+    func lateral(by dx: CGFloat) {
+        guard dx != 0 else { return }
+        let next = Self.clamp(lateralRaw + dx, -LateralCurve.rawLimit, LateralCurve.rawLimit)
+
+        // 只在推满的那一刻记一次事件，避免逐帧刷屏
+        if abs(next) >= LateralCurve.rawLimit, abs(lateralRaw) < LateralCurve.rawLimit {
+            lastEvent = next > 0 ? "幕墙推到最右" : "幕墙推到最左"
+        }
+        lateralRaw = next
+    }
+
+    /// 直接落到某个横向推程（`-1...1`），供滑杆与调试预置使用。
+    func lateral(to progress: CGFloat) {
+        lateralRaw = LateralCurve.rawValue(forProgress: Self.clamp(progress, -1, 1))
+        lastEvent = progress == 0
+            ? "幕墙回中"
+            : "横向推开 \(Int(lateral * 100))%"
+    }
+
     // MARK: - 光标
 
     /// 更新外接屏上的光标位置，入参为归一化坐标。
@@ -169,6 +243,19 @@ final class RemoteControl {
     /// 记录一条来自空鼠的离散事件，手机端读数栏直读。
     func noteAirMouseEvent(_ text: String) {
         lastEvent = text
+    }
+
+    /// 记录一次「返回」按钮被命中。
+    ///
+    /// ## 为什么现在只写一条事件
+    /// 按钮的**动作**还没有定论 —— 外接屏没有导航栈，"返回"回到哪一页
+    /// 只有需求方能定（见 `docs/specs/glass-wall-gesture.md` 的 D5）。
+    /// 这一版先把"按钮能被命中"这件事做完整（几何 + 命中优先级 + 悬浮态），
+    /// 动作留成一个**显式空位**：它在这里有名字、在渲染侧有唯一调用点，
+    /// 接上去是一行的事。用一个猜出来的页面把它填满，
+    /// 等于把不确定性藏进代码里 —— 那比明摆着留空难查得多。
+    func noteBackButton() {
+        lastEvent = "返回"
     }
 
     // MARK: - 缩放
@@ -195,6 +282,7 @@ final class RemoteControl {
 
     func reset() {
         position = 0
+        lateralRaw = 0
         zoom = 1
         pointer = nil
         pointerSource = .touch

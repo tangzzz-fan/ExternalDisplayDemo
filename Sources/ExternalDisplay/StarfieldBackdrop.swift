@@ -3,35 +3,57 @@ import SwiftUI
 /// 背景墙：劳斯莱斯星空顶式的假 3D 星海。
 ///
 /// ## 它在层次里的位置
-/// 永远是最底下一层，且**自己不动** —— 内容容器下拉时让出上半屏，它才露出来。
-/// 这样"露出多少"完全由内容的位移决定，星海不需要知道自己被露了多少，
+/// 永远是最底下一层，且**自己不动**。幕墙是一块**半透光的板**浮在它上面 ——
+/// 板被推向任一方向、或者透过板与板之间的缝，看到的都是它。
+///
+/// 这样"看到多少"完全由幕墙的材质与位移决定，星海不需要知道自己被露了多少，
 /// 也就不存在两套动画互相对不上相位的问题。
+///
+/// ## 为什么不再由 `pull` 控制透明度
+/// 早先星海是"下拉才出现"的：`pull == 0` 时透明度为 0，等于没画。
+/// 幕墙改成透光材质之后这条前提没了 —— **星海常驻可见**，
+/// 列间距那条缝里看到的就是它（需求 R6）。若还按 `pull` 淡入，
+/// 静止时缝里会是纯黑，R6 直接不成立。
+///
+/// 代价是顶部下拉的观感变了：今天"下拉才露出星海"是一个强反转信号，
+/// 现在星海一直在，下拉变成纯粹"把板推下去"。这是需求方确认过的取舍。
 ///
 /// ## 帧驱动
 /// 用 `TimelineView(.animation)` + `Canvas`（内部即 `CADisplayLink`），
 /// 与 `DisplayPatternCanvas` 同一套基建 —— 手机端关掉「帧驱动动画」后
 /// 外接屏应当立刻静止，这一点同样适用于这里。
 ///
-/// `paused` 挂在 `pull == 0` 上：**没露出来时完全不跑帧**。
-/// 不这么做的话，静止在内容后面的星海会一直以 60 Hz 重绘 600 颗星，
-/// 白白吃掉外接屏的渲染预算。
+/// `paused` 挂在"**有没有位移**"上（三条轴任一非零），而不是"露出来没"：
+/// - 有位移 → 跑帧，相机推进 + 星星闪烁；
+/// - 静止   → 暂停重绘，**保留最后一帧**，缝里依然看得到星海，帧成本回到 0。
+///
+/// 代价明确：**静止时星星不闪**。要让它一直闪就把 `isMoving` 传 `true`，
+/// 但那等于让一块静止的屏永久占用 600 颗星的绘制预算 —— 4K 上不是小数，
+/// 而外接屏没有虚拟化，这笔钱是按"永远"付的。
 struct StarfieldBackdrop: View {
 
-    /// 下拉进度，`0` = 完全被内容盖住，`1` = 上半屏完整露出。
-    let pull: CGFloat
+    /// 幕墙被推开的程度（`0...1`）：三条位移轴里最大的那一条。
+    ///
+    /// 驱动相机推进 —— 板让开多少，镜头就往星海深处走多少。
+    /// 三条轴的位移方向各不相同，但"离开原位多少"是一致的，
+    /// 所以同一个 dolly 对三向过卷都成立。
+    let dolly: CGFloat
 
     /// 视差倾斜（归一化 `-1...1`），由手机端光标落点推出。
     let tilt: CGPoint
 
+    /// 是否有位移。静止时暂停重绘以省下帧预算。
+    let isMoving: Bool
+
     /// 是否运行帧动画。关掉后星海静止，用于验证帧驱动确实来自本应用。
     let isAnimated: Bool
 
-    private var isActive: Bool { pull > 0.002 && isAnimated }
+    private var isActive: Bool { isMoving && isAnimated }
 
     var body: some View {
         GeometryReader { geometry in
             let projector = StarfieldProjector(viewport: geometry.size)
-            let camera = StarfieldCamera(dolly: pull, tiltX: tilt.x, tiltY: tilt.y)
+            let camera = StarfieldCamera(dolly: dolly, tiltX: tilt.x, tiltY: tilt.y)
 
             TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !isActive)) { timeline in
                 Canvas { context, size in
@@ -45,17 +67,9 @@ struct StarfieldBackdrop: View {
                 }
             }
         }
-        .opacity(fadeIn)
+        // 刻意**不**加 `.opacity(...)`：星海常驻可见，透明度恒为 1。
+        // 之前那层由 `pull` 驱动的淡入随材质改造一起删掉了（理由见类型文档）。
         .allowsHitTesting(false)
-    }
-
-    /// 下拉的前 30% 就把星海点亮到位，之后维持。
-    ///
-    /// 线性淡入会让"露出多少 = 多亮"，于是下拉过程中画面永远差一口气；
-    /// 提前亮到位之后，后续下拉才纯粹是"揭开"的动作，观感利落得多。
-    private var fadeIn: Double {
-        let t = min(max(Double(pull) / 0.3, 0), 1)
-        return t * t * (3 - 2 * t)
     }
 
     // MARK: - 绘制
@@ -306,6 +320,6 @@ private enum StarCatalog {
 }
 
 #Preview {
-    StarfieldBackdrop(pull: 1, tilt: .zero, isAnimated: true)
+    StarfieldBackdrop(dolly: 1, tilt: .zero, isMoving: true, isAnimated: true)
         .background(.black)
 }

@@ -281,6 +281,11 @@ mockWindow.rootViewController = UIHostingController(
 - 用真机 + USB-C/Lightning 转 HDMI 适配器（或 AirPlay）验证接入；
 - 两者都做，不要用前者替代后者。
 
+> **"用 mock 迭代 UI"这一步具体是怎么落成截图的** —— 替身窗口怎么在整屏截图里定位、
+> 裁切矩形怎么算、像素探针为什么必须 `PROBE_TOL=1` —— 见
+> [`external-display-screenshot.md`](external-display-screenshot.md)。
+> 本文讲的是"窗口怎么挂进去"，那篇讲的是"挂进去之后怎么把它拍下来看"。
+
 ---
 
 ## 七、踩坑清单

@@ -181,13 +181,17 @@ ExternaldisplayDemo/
 ├── Support/Info.plist                             scene manifest 在这里
 ├── docs/
 │   ├── mock-external-display.md                   -mockExternalDisplay 的原理（可发布）
+│   ├── external-display-screenshot.md             外接屏内容怎么截图（搬移→抓屏→裁切→探针）
 │   ├── scroll-feel.md                             上下滑动为什么跟手（体感角度）
+│   ├── specs/
+│   │   └── glass-wall-gesture.md                  玻璃幕墙手势：需求拆解、决策清单、分期
 │   └── devnotes/                                  分支级实验记录
 │       ├── 2026-09-22-swiftui-scene-accessory.md  scene accessory 改造
 │       ├── 2026-09-24-airmouse-gesture.md         空鼠手势：上下滑动 + 单指点击确认
 │       ├── 2026-09-24-waterfall-starfield.md      瀑布流 + 下拉露背景墙 + 星海假 3D
 │       ├── 2026-09-24-waterfall-inset-focus.md    瀑布流左右边距 + item 焦点环
-│       └── 2026-09-24-trackpad-two-finger.md      触摸板双指滚动（UIKit 触摸层）
+│       ├── 2026-09-24-trackpad-two-finger.md      触摸板双指滚动（UIKit 触摸层）
+│       └── 2026-09-24-glass-wall-material-back.md 玻璃幕墙：半透材质 + 返回按钮
 └── Sources/
     ├── App/
     │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）+ accessory 声明
@@ -212,18 +216,22 @@ ExternaldisplayDemo/
     │   ├── DisplayPatternCanvas.swift             逐帧渲染验证
     │   ├── WaterfallLayout.swift                  瀑布流布局 + 左右边距几何（纯计算，可独立断言）
     │   ├── WaterfallFocus.swift                  指针 → 卡片的命中判定（纯计算，可独立断言）
-    │   ├── WaterfallColumnView.swift              瀑布流视图（左右留白，每列完整）
-    │   ├── DisplayScrollGeometry.swift            滚动/下拉几何 + 手感曲线（纯计算）
+    │   ├── WaterfallColumnView.swift              瀑布流视图（左右留白，每列完整，卡片半透）
+    │   ├── DisplayScrollGeometry.swift            纵向滚动/过卷几何 + 手感曲线（纯计算）
+    │   ├── LateralGeometry.swift                 横向推开几何 + 手感曲线（纯计算，可独立断言）
+    │   ├── BackButtonGeometry.swift              返回按钮的圆与命中（纯计算，可独立断言）
+    │   ├── WallMaterial.swift                    幕墙材质：底板 / 卡片的不透明度
     │   ├── StarfieldModel.swift                   星表 + 透视投影（纯计算，可独立断言）
-    │   └── StarfieldBackdrop.swift                星海背景墙（TimelineView + Canvas）
+    │   └── StarfieldBackdrop.swift                星海（常驻可见；有位移时才跑帧）
     └── Debug/
         ├── MockExternalDisplay.swift              模拟器替身（不参与真机链路）
         ├── MockAirMouseSource.swift               陀螺仪替身
         └── MockRemoteState.swift                  从启动参数预置视口状态，供截图验证
 ```
 
-`WaterfallLayout` / `DisplayScrollGeometry` / `StarfieldModel` 三个文件**只依赖
-`CoreGraphics` 与 `Foundation`**，不认识 SwiftUI —— 这是刻意设计的，见第九节。
+`WaterfallLayout` / `WaterfallFocus` / `DisplayScrollGeometry` / `LateralGeometry` /
+`BackButtonGeometry` / `StarfieldModel` 这些文件**只依赖 `CoreGraphics` 与 `Foundation`**，
+不认识 SwiftUI —— 这是刻意设计的，见第九节。
 
 
 数据流：手机端改 `DisplayContentStore` → 外接屏 `ExternalDisplayRootView` 自动重绘。
@@ -256,21 +264,28 @@ ExternaldisplayDemo/
 ```
    手机端手势                   共享状态                    外接屏渲染
 GesturePad           ──写──▶   RemoteControl    ──读──▶  ExternalDisplayRootView
-  TouchSurface（UIKit）         scroll / pull            .offset(y:)
-  MagnifyGesture                pointer / tapCount       .scaleEffect()
-  CoreMotion                    pointerSource            laser cursor
+  TouchSurface（UIKit）         scroll / pull /          .offset(x:y:)
+  MagnifyGesture                bottomPull / lateral     .scaleEffect()
+  CoreMotion                    pointer / tapCount       laser cursor
+                                selectedItemID ◀──写── 卡片的命中判定
 ```
 
 | 手势 | 手机端采集 | 外接屏响应 |
 | --- | --- | --- |
 | **单指移动**（触控板） | `TouchSurface`，落点即时映射 | 橙色光标环跟手移动，**画面不动** |
-| **双指滑动**（触控板） | 同上，取两指**质心**的逐帧位移 | 内容列按 `scroll` 偏移（见第九节） |
+| **双指滑动**（触控板） | 同上，取两指**质心**的逐帧位移 | 幕墙按主轴位移：纵向滚动，横向推开（见第九节） |
 | **单指上下拖动**（空鼠栏） | 同上，单指即滚动 | 同上 |
-| 继续下拉 | 同上，越过顶部后自动转成 `pull` | 内容整体下移，露出星海背景墙（见第九节） |
-| 单指轻点 | 同上，位移未越过 slop（8pt）且**全程只有一根手指** | 光标处扩散一次涟漪（点击确认）。空鼠栏上等同按下「扳机」 |
+| 继续下拉 / 上拉 | 同上，越过顶部转成 `pull`、越过底部转成 `bottomPull` | 幕墙整体下移 / 上移，露出星海（见第九节） |
+| 横向推开 | 同上，首次越过 slop 的那条轴独占本次会话 | 幕墙整体左移 / 右移，让出的一侧露出星海 |
+| 单指轻点 | 同上，位移未越过 slop（8pt）且**全程只有一根手指** | 命中返回按钮则记一条事件，否则切换卡片选中态 |
 | 转动手机 | `CoreMotion`（`AirMouse`） | 红色激光指针 + 拖尾；同时驱动星海视差 |
 | 双指捏合 | `MagnifyGesture`，**仅触控板** | hero 图案画布 `.scaleEffect(zoom)` |
 | 手指落点 → 光标环 | **仅触控板**（空鼠栏 `mapsPointer: false`） | 橙色光标环 |
+
+> **主轴锁定**：首次越过 slop 的那一帧定下本次会话的轴（横 / 竖），另一轴整段不出动作。
+> 这与原设计"斜着拖照样能滚、横向那段丢弃"是同一种手感，只是横轴从"丢弃"变成了
+> "改变量"。改成自由二维的话，一次略斜的竖拖会让幕墙横着飘 —— 那是没被要求的行为。
+> 指数中途变化（双指 ↔ 单指）会重设基准并当帧零位移，否则质心那一跳会被当成一次大位移。
 
 > 触控板把**单指留给光标、双指留给滚动** —— 两种意图各占一种指数，
 > 不靠位移方向去猜（方向会猜错，指数不会）。空鼠栏反过来：手机举在手上，
@@ -395,6 +410,8 @@ SwiftUI 在 iOS 17 上**拿不到手指数量**：
 > 「状态 → 渲染」那半条已用 `-remoteState` 预置参数逐状态截图验证过
 > （`scroll = 0.62` / `zoom = 1.9` / `pointer = (0.3, 0.35)`）：可见内容恰为条目 04（顶部被切）～11，
 > 光标环实测落点 `(109.5, 70.8)pt`，与计算值 `(108.6, 71.0)pt` 一致。
+> **这套截图链路本身的说明**（替身窗口怎么定位、裁切矩形怎么算、探针为什么必须
+> `PROBE_TOL=1`）见 [`docs/external-display-screenshot.md`](docs/external-display-screenshot.md)。
 >
 > **手势归属靠结构保证，不靠运气**。触控板最初放在 `Form` 里，它的 `DragGesture` 会与外层
 > 滚动视图的竖向 pan 手势竞争 —— 而 SwiftUI **没有**能压过祖先 `ScrollView` 的公开 API
@@ -703,7 +720,7 @@ Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两�
 
 ---
 
-## 九、瀑布流 + 下拉露背景墙 + 星海
+## 九、瀑布流 + 星海幕墙
 
 完整设计推导、踩坑与实测数据见
 [`docs/devnotes/2026-09-24-waterfall-starfield.md`](docs/devnotes/2026-09-24-waterfall-starfield.md)。
@@ -714,7 +731,10 @@ Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两�
 外接屏用不了 `ScrollView`（第四节），所以瀑布流也是手写 `.offset` 驱动的：
 
 ```swift
-.offset(y: plan.scroll.contentOffset(scroll: remote.scroll, pull: pull))
+.offset(x: plan.lateral.offset(for: remote.lateral),
+        y: plan.scroll.contentOffset(scroll: remote.scroll,
+                                     pull: remote.pull,
+                                     bottomPull: remote.bottomPull))
 ```
 
 全项目**没有任何 `UIScrollView` 参与滚动**。UIKit 只出现在宿主层。
@@ -723,24 +743,27 @@ Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两�
 
 | 端 | 在哪 | 干什么 |
 | --- | --- | --- |
-| 输入 | `GesturePad`（第四节，**触控板与空鼠栏各一块**） | 触摸 → `PadGesture` → `RemoteControl.scroll(by:)`（触控板认双指、空鼠栏认单指） |
-| 输出 | `ExternalDisplayRootView` | 读 `remote.scroll` / `pull` → 算 `.offset(y:)` |
+| 输入 | `GesturePad`（第四节，**触控板与空鼠栏各一块**） | 触摸 → `PadGesture` → `RemoteControl.scroll(by:)` / `lateral(by:)` |
+| 输出 | `ExternalDisplayRootView` | 读三轴状态 → 算 `.offset(x:y:)`、四角圆角、投影、星海曝光量 |
 
 本节只讲**输出端**的几何；输入端（slop、逐帧增量、两块面的差异）在第四节。
 
-### 滚动与下拉是同一个标量的两段
+### 过卷是同一个标量的两段（现在是三段）
 
 原来的 `scroll` 被 clamp 在 `0...1`，表达不了"已经在顶部还继续往下拽"。
 但这两件事其实是同一条数轴上的两段，所以内部只留一个权威标量：
 
 ```
-position > 0  →  正常滚动进度
-position < 0  →  顶部下拉的超出行程
+position < 0   →  顶部下拉的超出行程
+position 0...1 →  正常滚动进度
+position > 1   →  底部上拉的超出行程
 ```
 
-对外暴露 `scroll` 与 `pull`，但**唯一权威只有 `position`**。
-拆成两个可独立写的存储属性的话，下拉时被阻尼吃掉的那部分行程，
+对外暴露 `scroll` / `pull` / `bottomPull` 三个属性，但**唯一权威只有 `position`**。
+拆成三个可独立写的存储属性的话，过卷时被阻尼吃掉的那部分行程，
 在回拉时会变成凭空多出来的滚动 —— 手指一松内容就跳。
+
+（横向是**另一条轴**，理由见下方「玻璃幕墙」一节。）
 
 手感曲线 `1 - (1 - t)^1.7` 起手轻快、末段发沉，且在 `t = 1` 处**恰好取到 1**
 （不是渐近逼近）—— 否则「内容顶边落在屏幕中线」这个几何承诺永远差一截。
@@ -751,8 +774,15 @@ position < 0  →  顶部下拉的超出行程
 那是「网格」不是「瀑布流」。真瀑布流要求每列的项独立堆叠、互不对齐。
 
 本工程的实现是贪心分列（每项放进当前最矮的列），写成纯函数放在 `WaterfallLayout`，
-高度用**权重**而不是点数（`unitHeight = 画面短边 × 0.20`），列数按宽高比选（16:9 用 4 列，
-4:3 用 3 列）。
+高度用**权重**而不是点数（`unitHeight = 画面短边 × 0.20`）。
+
+列数有两套口径：`columnCount(for:)` 按宽高比自适应（16:9 用 4 列、4:3 用 3 列），
+那是原设计的判据 —— "列宽要放得下卡片文字"。**幕墙这一版不走它**，改用显式的
+`WaterfallMetrics.wallColumns = 6`：需求方向变了，要的是**缝够密**，
+列越多、竖缝越多，星海透过来的地方就越多，幕墙的玻璃感主要来自这些缝。
+代价是模拟器替身窗口（362×195.6 点）上列宽被压到 52pt 上下，
+底栏文案要靠 `minimumScaleFactor` 缩到 0.65 倍。定义在 `WaterfallMetrics` 里
+而不是写在视图里的原因见下方「幕墙」一节（为了让验收脚本取到同一个数）。
 
 卡片的随机量分五路，都走同一条确定性随机序列（换种子即换一整片内容）：
 
@@ -806,14 +836,17 @@ var columnWidth: CGFloat { (columnFieldWidth - 列间距) / columns }
 没有模拟器的情况下跑断言：
 
 ```swift
-focus.item(at: viewportPoint, contentOffsetY: offsetY)   // → Int?
+focus.item(at: viewportPoint, contentOffset: offset)   // → Int?
 ```
 
 两个关键点：
 
 - **落位坐标取「列排布区」而不是视口**，与左右留白解耦。`fieldOrigin` 只在
-  视口尺寸变化时重算，`contentOffsetY` 每帧传进来 —— 前者是布局、后者是滚动，
-  更新频率差两个数量级，混在一起就分不开"内容滚了"和"布局变了"。
+  视口尺寸变化时重算，`contentOffset` 每帧传进来 —— 前者是布局、后者是位移，
+  更新频率差两个数量级，混在一起就分不开"内容动了"和"布局变了"。
+- **位移必须把横向分量一起喂进来**。`contentOffset` 是 `CGSize` 而不是
+  `CGFloat`，正因为幕墙能被横向推开：少喂横向分量不会报错、也不会在纵向滚动时
+  露馅，只在横向一动才显形 —— 表现为"指针点到的永远是隔壁那张卡"。
 - **半开区间**（`CGRect.contains`）：相邻两张卡之间那条边界只归属其中一张，
   既不会同时命中两个，也不会两边都落空。
 
@@ -827,6 +860,85 @@ focus.item(at: viewportPoint, contentOffsetY: offsetY)   // → Int?
 
 完整推导、实测与三个已知限制见
 [`docs/devnotes/2026-09-24-waterfall-inset-focus.md`](docs/devnotes/2026-09-24-waterfall-inset-focus.md)。
+
+### 玻璃幕墙：一块可以被四向推开的板
+
+需求里的六条（横推开露星海、上拉露星海、缝里透星海、左上角返回按钮）合起来是
+同一个模型：
+
+> 幕墙 = 一块**尺寸固定、位置可变**的板。板后面是星海。
+> 板被推向任意方向，让出的那一侧就露出星海；板自身半透光，所以隔着缝也看得到星海。
+
+按这个模型，横向与纵向只是同一次 `.offset` 的两个分量，不是两套机制：
+
+```swift
+.offset(x: plan.lateral.offset(for: remote.lateral),
+        y: plan.scroll.contentOffset(scroll: remote.scroll,
+                                     pull: remote.pull,
+                                     bottomPull: remote.bottomPull))
+```
+
+| 轴 | 状态 | 满行程 | 手感曲线 |
+| --- | --- | --- | --- |
+| 纵向滚动 | `RemoteControl.scroll` `0...1` | 内容高度决定 | 无（逐帧直连） |
+| 顶部下拉 | `RemoteControl.pull` `0...1` | 视口高 × 0.5 | `PullCurve` |
+| 底部上拉 | `RemoteControl.bottomPull` `0...1` | 视口高 × 0.5 | `PullCurve`（复用） |
+| 横向推开 | `RemoteControl.lateral` `-1...1` | 短边 × 0.278 | `LateralCurve` |
+
+纵向三段仍然共用一个权威标量 `position`（`< 0` 下拉、`0...1` 滚动、`> 1` 上拉）；
+横向**另立一条轴** —— 它与纵向物理正交，塞进同一个标量就得每次读写拆了再接回去。
+判据是"能不能靠一个数轴上的位置关系互相推导"，能就合并、不能就并列。
+
+三段之外还有一个跨轴的量：`wallExposure`（三向过卷里最大的那一条）。
+板的投影强度、四角圆角、星海的相机推进都按它走 —— 三条轴的位移方向各不相同，
+但"离开原位多少"是一致的。
+
+### 材质：底板 58%、卡片 84%，都**不模糊**
+
+这是本次唯一反转既有决定的地方。原设计里容器底是刻意**不透明**的，注释写着
+"否则星海会从卡片缝隙里透上来，背景墙的『墙』就立不住了"。幕墙要的正是它的反面。
+
+| 层 | 不透明度 | 位置 |
+| --- | --- | --- |
+| 底板 | `WallMaterial.plateOpacity = 0.58` | 「缝里能不能看到星星」的唯一开关 |
+| 卡片填充 | `WallMaterial.cardFillOpacity = 0.84` | 卡后隐约有星；文字与描边保持**实心** |
+| 星海 | 恒为 1 | 常驻可见，不再由 `pull` 淡入 |
+
+两个连带结论：
+
+- **星海从"下拉才出现"变成"一直在"**，顶部下拉因此从"露出星海"变成纯粹
+  "把板推下去"。这是需求确认过接受的观感变化。
+- **星海的停帧判据从「露出来没」改成「动没动」**：静止时暂停重绘、保留最后一帧，
+  缝里照旧看得到星海，帧成本回到 0。代价是**静止时星星不闪**。
+
+玻璃感靠三样现成的东西撑：卡片已有的白描边、同侧径向高光、焦点环那套白环语言。
+**刻意不做 `backdrop blur`**：外接屏没有虚拟化，36 张卡各挂一次模糊就是每帧 36 次
+离屏采样，而背后的星海还在动；更要紧的是模糊会把星点糊成雾，与"看清后面的星星海"
+方向相反。
+
+### 返回按钮：浮动圆，不是一条栏
+
+左下角那枚按钮的几何是纯函数 `BackButtonGeometry`（直径 = 短边 × 0.11，
+外沿距上/左边 = 短边 × 0.045），命中按**圆**判而不是外接矩形 ——
+指针划过四角时，矩形会在视觉上没有按钮的地方把点击吃掉。
+
+两条要点：
+
+- **不能形成一条横栏**。铺满屏宽的不透明栏会把幕墙切成两段：上沿露出的星海与
+  幕墙本体被那条栏隔开，看起来像两个不相干的区域。所以它只垫了一层
+  `black.opacity(0.35)`，四周透出去的都是幕墙本身。
+- **命中优先级是「按钮 > 卡片」**。按钮在固定层（不随幕墙位移），卡片在幕墙层
+  （跟着位移）—— 于是**必然**存在"幕墙上拉之后卡片滑到按钮底下"的时刻。
+  这一刻点击归谁必须显式规定，否则点按钮会变成选中底下的卡。
+
+> 按钮的**动作**目前只记一条 `lastEvent`。跳到哪一页还没有定论
+> （规格里的 D5），渲染侧留了唯一一个调用点，接上去是一行的事。
+> 用一个猜出来的页面把它填满，等于把不确定性藏进代码里。
+
+完整推导、决策清单与分期见
+[`docs/specs/glass-wall-gesture.md`](docs/specs/glass-wall-gesture.md)，
+实施记录见
+[`docs/devnotes/2026-09-24-glass-wall-material-back.md`](docs/devnotes/2026-09-24-glass-wall-material-back.md)。
 
 ### 星海：假 3D 的关键是"压缩过的透视"
 

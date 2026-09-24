@@ -6,11 +6,16 @@ import Foundation
 /// 手机端只传归一化进度，实际位移在这里按画面尺寸换算 —— 这样同一份
 /// 手机端状态在 1080p / 4K / 模拟器 letterbox 小窗口上都成立。
 ///
-/// ## 两个独立的位移
+/// ## 三个位移，一条纵轴 + 一条横轴
 /// - `scrollOffset`：内容在瀑布流里的正常滚动（`scroll` 0...1），方向**向上**；
-/// - `pullOffset`：顶部继续下拉让出的空间（`pull` 0...1），方向**向下**。
+/// - `pullOffset`：顶部继续下拉让出的空间（`pull` 0...1），方向**向下**；
+/// - `bottomOffset`：滚到底后继续上拉让出的空间（`bottomPull` 0...1），方向**向上**。
 ///
-/// 后者就是"背景墙"露出来的高度。两者相加才是内容容器最终的 y 偏移。
+/// 前两个相加才是正常状态下内容容器最终的 y 偏移。第三个是后加的：
+/// 它和 `pullOffset` 是同一件事的两端 —— 一端把内容推下去、一端把内容拽上来，
+/// 露出的都是星海。
+///
+/// 横向位移不在这里，它由 `LateralMetrics` 负责 —— 理由见那个类型。
 ///
 /// ## 为什么内容高度是外部传进来的
 /// 瀑布流的列高是**布局算完之后**才知道的（贪心分列的结果），
@@ -43,6 +48,13 @@ struct ScrollMetrics: Equatable, Sendable {
     /// 下拉到底时内容能下移的距离。
     var maxPullDistance: CGFloat { viewport.height * Self.pullDistanceRatio }
 
+    /// 上拉到底时内容能上移的距离。
+    ///
+    /// 与下拉**对称**取同一个比例。这不是偷懒 —— 两条边是同一个动作的两端，
+    /// 露出的是同一片星海，行程不一致的话"往上拽比往下拽费劲"会变成
+    /// 一个说不清来由的手感差异。
+    var maxBottomDistance: CGFloat { viewport.height * Self.pullDistanceRatio }
+
     /// 内容**顶部第一个元素**（本项目里是 hero 区）能有多高，
     /// 才能在 `pull = 1` 时完整落在可见区内而不被屏幕下沿切掉。
     ///
@@ -67,22 +79,92 @@ struct ScrollMetrics: Equatable, Sendable {
         maxPullDistance * min(max(pull, 0), 1)
     }
 
-    /// 内容容器最终的 y 偏移。
-    ///
-    /// 正常滚动是**负**的（内容上移），下拉是**正**的（内容下移）。
-    /// 两者不会同时非零：`RemoteControl` 里 `scroll` 与 `pull` 分别取自
-    /// 同一个标量的正负两段，所以这里相加不会互相污染。
-    func contentOffset(scroll: CGFloat, pull: CGFloat) -> CGFloat {
-        pullOffset(for: pull) - scrollOffset(for: scroll)
+    func bottomOffset(for bottomPull: CGFloat) -> CGFloat {
+        maxBottomDistance * min(max(bottomPull, 0), 1)
     }
 
-    /// 下拉时内容容器顶边的圆角半径。
+    /// 内容容器最终的 y 偏移。
     ///
-    /// 下拉过程中容器会从"铺满视口"逐渐变成"浮在星海之上的一张卡片"，
-    /// 圆角是这个转变的视觉信号。`pull = 0` 时必须是 0，
-    /// 否则静止状态下画面顶部会莫名其妙缺两个角。
-    func cornerRadius(for pull: CGFloat, base: CGFloat) -> CGFloat {
-        base * 0.03 * min(max(pull, 0), 1)
+    /// 正常滚动是**负**的（内容上移），下拉是**正**的（内容下移），上拉又是负的。
+    ///
+    /// 三段**不会互相污染**：`scroll` 与 `pull` 分别取自同一个标量的正负两段，
+    /// 不可能同时非零；`bottomPull` 只在 `scroll` 已经顶到 1 之后才出现，
+    /// 此时它与 `scrollOffset` 相加的净效果正是"滚到底之后再往上拽多少"。
+    /// 若把这三段拆成三个可独立写的存储属性，阻尼吃掉的那部分行程
+    /// 会在回拉时变成凭空多出来的滚动，手指一松内容就跳。
+    func contentOffset(scroll: CGFloat, pull: CGFloat, bottomPull: CGFloat = 0) -> CGFloat {
+        pullOffset(for: pull) - scrollOffset(for: scroll) - bottomOffset(for: bottomPull)
+    }
+
+    /// 浮起时的四角圆角半径。
+    ///
+    /// `pull = 0` 时必须是 0，否则静止状态下画面顶部会莫名其妙缺两个角。
+    func cornerRadius(base: CGFloat) -> CGFloat { base * 0.03 }
+}
+
+/// 幕墙"离开原位"的程度：三条位移轴里最大的那一条。
+///
+/// ## 为什么需要一个跨轴的量
+/// 浮板的表现（投影、圆角强度、星海的相机推进）不由某一条轴单独决定，
+/// 而由"这块板被推开了多少"决定 —— 横推露出的左侧星海与下拉露出的上半屏，
+/// 是同一块板浮起来的两面，投影不该有两种算法。
+///
+/// 三条轴的取值范围与符号各不相同（`pull` / `bottomPull` 是 `0...1`，
+/// `lateral` 是 `-1...1`），这里统一夹到 `0...1` 再取最大。
+/// 夹一次而不是取绝对值的最大值：负的 `lateral` 表示往另一个方向推，
+/// "推开了多少"仍然是非负量。
+func wallExposure(pull: CGFloat, bottomPull: CGFloat, lateral: CGFloat) -> CGFloat {
+    let top = min(max(pull, 0), 1)
+    let bottom = min(max(bottomPull, 0), 1)
+    let horizontal = abs(min(max(lateral, -1), 1))
+    return max(top, max(bottom, horizontal))
+}
+
+/// 浮板的四角圆角。
+///
+/// ## 为什么不能只做"顶边圆角"
+/// 顶边圆角是原设计：内容容器只在下拉时浮起，另外三条边永远贴着屏幕边缘、
+/// 或者伸到屏幕外，圆角根本看不见，于是当年用一个 `TopRoundedRect` 就够了。
+///
+/// 幕墙能被四向推开之后这条前提没了：横推露出左（右）侧星海时，
+/// 那一条**竖边**整条都在屏内，角要不要圆、圆多少，就成了看得见的观感差异。
+/// 四条边各算各的，才叫"一块浮板"。
+struct WallRadii: Equatable, Sendable {
+
+    var topLeading: CGFloat
+    var topTrailing: CGFloat
+    var bottomLeading: CGFloat
+    var bottomTrailing: CGFloat
+
+    /// 由"哪几侧被推开了"推出四角。
+    ///
+    /// 每条边的暴露量：上边看 `pull`、下边看 `bottomPull`、左右两边看 `lateral` 的符号。
+    /// 一个角同时属于两条边，取两者的**较大值** —— 取小的那个会让"顶边掀起来了
+    /// 但左角还没圆"这种半吊子状态出现，而它既不像浮板也不像铺满，最难看。
+    ///
+    /// - Parameters:
+    ///   - pull: 顶部下拉进度 `0...1`
+    ///   - bottomPull: 底部上拉进度 `0...1`
+    ///   - lateral: 横向推程 `-1...1`，正数 = 幕墙右移（露左侧星海）
+    ///   - radius: 满暴露时的圆角半径
+    static func forExposure(
+        pull: CGFloat,
+        bottomPull: CGFloat,
+        lateral: CGFloat,
+        radius: CGFloat
+    ) -> WallRadii {
+        let top = min(max(pull, 0), 1)
+        let bottom = min(max(bottomPull, 0), 1)
+        let horizontal = min(max(lateral, -1), 1)
+        let left = max(top, max(0, horizontal))
+        let right = max(top, max(0, -horizontal))
+
+        return WallRadii(
+            topLeading: radius * left,
+            topTrailing: radius * right,
+            bottomLeading: radius * max(bottom, max(0, horizontal)),
+            bottomTrailing: radius * max(bottom, max(0, -horizontal))
+        )
     }
 }
 

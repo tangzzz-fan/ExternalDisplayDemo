@@ -9,17 +9,19 @@ import SwiftUI
 /// 这里采集，再经 `RemoteControl` 单向送到外接屏的渲染视图。
 ///
 /// 采集到的手势（全部由 `GesturePad` 承担，本类只负责接线）：
-/// - 单指移动 → 移动外接屏上的光标，**不**滚动
-/// - 双指滑动 → 滚动，滚动量取两指质心的位移
+/// - 单指移动 → 移动外接屏上的光标，**不**产生任何位移
+/// - 双指上下滑动 → 滚动；顶到头继续拽是下拉、底到头继续拽是上拉
+/// - 双指左右滑动 → 横向推开幕墙，让出那一侧露出星海
 /// - 单指轻点 → 点击确认
 /// - 双指捏合 → 缩放（模拟器需按住 Option 拖拽）
 ///
-/// 单指与双指各占一样，是为了让"我要移光标"和"我要滚画面"两种意图
+/// 单指与双指各占一样，是为了让"我要移光标"和"我要推画面"两种意图
 /// 不靠位移方向去猜 —— 猜错一次就是一次误操作，而手指数量是明确的。
+/// 触控板上的横向也因此必须走**双指**：单指已经被光标占满了。
 ///
 /// 另配绝对定位控件（滑杆 / 按钮）作为兜底：模拟器里捏合手势不好操作，
 /// 且真机上也常有"精确调到某个值"的需求。
-/// **不要把它放进 `Form` / `ScrollView`**：采集面的 `DragGesture` 会与外层滚动视图的
+/// **不要把它放进 `Form` / `ScrollView`**：采集面会与外层滚动视图的
 /// 竖向 pan 手势竞争，而 SwiftUI 没有能压过祖先 ScrollView 的公开 API
 /// （`highPriorityGesture` 只影响当前视图与其子视图）。
 /// 统一由 `RemoteControlDock` 经 `.safeAreaInset` 挂在滚动区域之外。
@@ -48,8 +50,8 @@ struct RemoteControlPad: View {
         GesturePad(
             hints: [
                 GesturePadHint(text: "单指移动 → 移动光标"),
-                GesturePadHint(text: "双指滑动 → 滚动外接屏"),
-                GesturePadHint(text: "顶部继续下拉 → 露出星海背景墙", isSecondary: true),
+                GesturePadHint(text: "双指上下 → 滚动 / 顶部下拉 / 底部上拉"),
+                GesturePadHint(text: "双指左右 → 推开幕墙，露出星海"),
                 GesturePadHint(text: "轻点 → 点击确认"),
                 GesturePadHint(text: "双指捏合 → 缩放（模拟器按住 Option）", isSecondary: true)
             ],
