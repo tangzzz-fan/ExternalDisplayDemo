@@ -18,8 +18,18 @@ import SwiftUI
 /// 就叫 `ExternalNonInteractiveAccessory`。
 ///
 /// 所以这个视图是**纯输出**的：它只读 `RemoteControl` 的共享状态，
-/// 滚动 / 缩放 / 光标全部由手机端的遥控板写入。在这里加 `ScrollView`
+/// 滚动 / 下拉 / 缩放 / 光标全部由手机端的遥控板写入。在这里加 `ScrollView`
 /// 或 `.gesture` 是无效的 —— 手势根本到不了这棵视图树。
+///
+/// ## 层次
+/// ```
+/// StarfieldBackdrop        最底层，固定不动；内容下拉让出上半屏时它才露出来
+/// └ contentColumn          内容容器，整体随 scroll/pull 上下位移
+///   ├ hero                 图案 canvas（帧驱动演示）+ 标题
+///   └ WaterfallColumnView  瀑布流卡片
+/// ├ hud                    固定，不参与滚动
+/// ├ pointer / ripple       固定，跟随手机端光标
+/// ```
 ///
 /// 排版全部按画面短边等比缩放，因此同一份代码在 1080p 真外接屏、
 /// 4K 外接屏、以及模拟器的 letterbox 小窗口里都不会溢出或截断。
@@ -54,33 +64,60 @@ struct ExternalDisplayRootView: View {
     /// 拖尾保留的采样点数。空鼠 60 Hz，10 个点约 0.17 s，视觉上刚好"有余晖"。
     private static let laserTrailLength = 10
 
-    /// 可滚动内容的行数，决定滚动距离。
-    private let rowCount = 14
+    /// 瀑布流卡片数量。
+    ///
+    /// 没有虚拟化（外接屏用不了 `ScrollView`，也就没有 `Lazy*` 容器），
+    /// 全部一次性建出来。这个量级没问题，上百张得自己写回收池。
+    private static let itemCount = 36
+
+    /// 卡片数据。固定种子 → 每次启动的高度与配色完全一致，
+    /// 逐状态截图对比才有意义。
+    private static let items = WaterfallItem.demoItems(count: itemCount)
+
+    /// hero 区（图案 canvas + 标题）的理想高度占比。
+    private static let heroHeightRatio: CGFloat = 0.56
+
+    /// hero 区的实际高度。
+    ///
+    /// 理想占比会被 `ScrollMetrics.maxLeadingElementHeight` **压低** ——
+    /// 后者是下拉几何反推出的硬上限：`pull = 1` 时可见的内容高度只剩半个视口，
+    /// hero 再高就会被屏幕下沿切掉标题。
+    ///
+    /// 理想值 0.56 在 letterbox 小窗口（362×204 点）上算出来是 114pt，
+    /// 而上限只有 87.6pt —— 也就是说这个场景下**上限才是生效的那个**，
+    /// 占比只是个不越界的愿望。
+    private static func heroHeight(for viewport: CGSize, inset: CGFloat) -> CGFloat {
+        min(
+            viewport.height * heroHeightRatio,
+            ScrollMetrics.maxLeadingElementHeight(viewport: viewport, inset: inset)
+        )
+    }
 
     var body: some View {
         GeometryReader { geometry in
-            let metrics = ScrollMetrics(
-                base: min(geometry.size.width, geometry.size.height),
-                viewport: geometry.size,
-                rowCount: rowCount
-            )
+            let plan = DisplayPlan(viewport: geometry.size)
 
             ZStack(alignment: .topLeading) {
-                Color.black
+                StarfieldBackdrop(
+                    pull: remote.pull,
+                    tilt: parallaxTilt,
+                    isAnimated: store.isAnimated
+                )
 
-                DisplayPatternCanvas(pattern: store.pattern, isAnimated: store.isAnimated)
-                    .scaleEffect(remote.zoom)
-                    .animation(.easeOut(duration: 0.15), value: remote.zoom)
+                contentColumn(plan)
 
-                scrollColumn(metrics: metrics)
+                hud(plan)
 
-                hud(metrics: metrics)
+                pointer(plan)
 
-                pointer(metrics: metrics)
-
-                ripple(metrics: metrics)
+                ripple(plan)
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
+            // 内容容器刻意不受视口高度约束（它要能滚动、能溢出），于是 ZStack
+            // 的尺寸会被撑到内容总高 —— 而 `.frame` 默认是**居中**对齐，
+            // 一旦 ZStack 比 frame 大，它就会被往上顶掉半个差值，画面看起来
+            // "莫名其妙从第 3 行开始"。必须显式写 `alignment: .topLeading`。
+            // 这与 `scrollColumn` 当年踩的是同一个坑（README 踩坑第 10 条）。
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             .clipped()
             .onAppear { reportMetrics(geometry.size) }
             .onChange(of: geometry.size) { _, size in reportMetrics(size) }
@@ -90,6 +127,44 @@ struct ExternalDisplayRootView: View {
         .onChange(of: remote.tapCount) { _, _ in playTapFeedback() }
         .onChange(of: remote.pointerSource) { _, _ in laserTrail.removeAll() }
         .onChange(of: remote.pointer) { _, point in appendToLaserTrail(point) }
+    }
+
+    // MARK: - 几何
+
+    /// 一帧内所有几何量的汇总。
+    ///
+    /// 打包成一个值而不是散在 `body` 里逐层传参：布局有顺序依赖
+    /// （先瀑布流分列 → 才有内容总高 → 才有可滚动距离），
+    /// 集中在一处算能保证这个顺序不会被后续改动打乱。
+    private struct DisplayPlan {
+
+        let base: CGFloat
+        let waterfall: WaterfallMetrics
+        let layout: WaterfallLayout
+        let scroll: ScrollMetrics
+        let heroHeight: CGFloat
+
+        init(viewport: CGSize) {
+            let base = min(viewport.width, viewport.height)
+            let waterfall = WaterfallMetrics(
+                base: base,
+                viewport: viewport,
+                columns: WaterfallMetrics.columnCount(for: viewport)
+            )
+            let layout = WaterfallLayout.make(items: ExternalDisplayRootView.items, metrics: waterfall)
+            let heroHeight = ExternalDisplayRootView.heroHeight(for: viewport, inset: waterfall.inset)
+
+            self.base = base
+            self.waterfall = waterfall
+            self.layout = layout
+            self.heroHeight = heroHeight
+            // 内容总高 = hero + 间距 + 瀑布流。上下内边距由 ScrollMetrics 自己加。
+            self.scroll = ScrollMetrics(
+                viewport: viewport,
+                contentHeight: heroHeight + waterfall.inset + layout.contentHeight,
+                inset: waterfall.inset
+            )
+        }
     }
 
     // MARK: - 自测量
@@ -115,94 +190,108 @@ struct ExternalDisplayRootView: View {
         onMetricsChange(pixelSize(for: viewport), displayScale)
     }
 
-    // MARK: - 可滚动内容
+    // MARK: - 内容容器
 
-    private func scrollColumn(metrics: ScrollMetrics) -> some View {
-        VStack(alignment: .leading, spacing: metrics.rowSpacing) {
-            header(metrics: metrics)
+    /// 内容容器：正常铺满视口，下拉时整体下移、顶边浮起圆角，
+    /// 变成浮在星海之上的一张卡片。
+    ///
+    /// 两个几何动作叠加在同一次 `.offset` 里（`pullOffset - scrollOffset`），
+    /// 而这两段位移分别取自 `RemoteControl` 里同一个标量的正负两段，不会互相污染。
+    private func contentColumn(_ plan: DisplayPlan) -> some View {
+        let pull = remote.pull
+        let cornerRadius = plan.scroll.cornerRadius(for: pull, base: plan.base)
 
-            ForEach(1...metrics.rowCount, id: \.self) { index in
-                row(index: index, metrics: metrics)
+        return VStack(alignment: .leading, spacing: plan.waterfall.inset) {
+            hero(plan)
+            WaterfallColumnView(layout: plan.layout, metrics: plan.waterfall)
+        }
+        .padding(plan.waterfall.inset)
+        // 容器背景必须不透明：下拉让出的上半屏要露出星海，若容器透光，
+        // 星海会从卡片缝隙里透上来，背景墙的"墙"就立不住了。
+        .background(Color(red: 0.004, green: 0.005, blue: 0.014))
+        .clipShape(TopRoundedRect(cornerRadius: cornerRadius))
+        .shadow(
+            color: .black.opacity(Double(pull) * 0.7),
+            radius: plan.base * 0.05 * pull,
+            y: plan.base * 0.012 * pull
+        )
+        .offset(y: plan.scroll.contentOffset(scroll: remote.scroll, pull: pull))
+    }
+
+    /// hero 区：帧驱动图案 + 标题 + 分辨率。
+    ///
+    /// 图案从"铺满整屏的底"降级成"内容的第一屏" —— 它现在随内容一起被滚走、
+    /// 被下拉推下去，物理上自洽；而它作为「外接屏真的由本应用逐帧渲染」的
+    /// 验证手段依然成立（手机端关掉帧驱动，这一块立刻静止）。
+    ///
+    /// 缩放仍然只作用于这块图案：它是"封面图缩放"，不是画面缩放 ——
+    /// 让 `zoom` 去缩放整个内容容器会连带打乱瀑布流的列宽计算。
+    private func hero(_ plan: DisplayPlan) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            DisplayPatternCanvas(pattern: store.pattern, isAnimated: store.isAnimated)
+                .scaleEffect(remote.zoom)
+                .animation(.easeOut(duration: 0.15), value: remote.zoom)
+
+            // 压暗底部，保证标题在任何图案上都读得出来
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.78)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+
+            VStack(alignment: .leading, spacing: plan.base * 0.012) {
+                Text(store.caption)
+                    .font(.system(size: plan.base * 0.072, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+
+                Text(resolutionText(for: plan.scroll.viewport))
+                    .font(.system(size: plan.base * 0.036, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.7))
             }
+            .padding(plan.base * 0.045)
         }
-        .padding(metrics.inset)
-        .offset(y: -metrics.offset(for: remote.scroll))
-        .shadow(color: .black.opacity(0.55), radius: metrics.base * 0.02, y: metrics.base * 0.003)
-        // 内容高度远超视口，`.frame` 必须显式指定 topLeading —— 默认是居中，
-        // 会让画面在滚动起点就偏移半屏。`.clipped()` 负责把溢出的部分切掉。
-        .frame(
-            width: metrics.viewport.width,
-            height: metrics.viewport.height,
-            alignment: .topLeading
-        )
-        .clipped()
-    }
-
-    private func header(metrics: ScrollMetrics) -> some View {
-        VStack(alignment: .leading, spacing: metrics.base * 0.02) {
-            Text(store.caption)
-                .font(.system(size: metrics.base * 0.075, weight: .bold, design: .rounded))
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-
-            Text(resolutionText(for: metrics.viewport))
-                .font(.system(size: metrics.base * 0.038, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.7))
-        }
-        .frame(width: metrics.contentWidth, height: metrics.headerHeight, alignment: .leading)
-    }
-
-    private func row(index: Int, metrics: ScrollMetrics) -> some View {
-        HStack(spacing: metrics.base * 0.03) {
-            Text(String(format: "%02d", index))
-                .font(.system(size: metrics.base * 0.045, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.45))
-                .frame(width: metrics.base * 0.1, alignment: .leading)
-
-            Text("内容条目 \(index)")
-                .font(.system(size: metrics.base * 0.05, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.92))
-
-            Spacer(minLength: 0)
-
-            Rectangle()
-                .fill(.white.opacity(0.16))
-                .frame(width: metrics.base * 0.12, height: 1)
-        }
-        .padding(.horizontal, metrics.base * 0.03)
-        .frame(width: metrics.contentWidth, height: metrics.rowHeight)
-        .background(
-            RoundedRectangle(cornerRadius: metrics.base * 0.015, style: .continuous)
-                .fill(.white.opacity(index.isMultiple(of: 2) ? 0.06 : 0.02))
-        )
+        .frame(height: plan.heroHeight)
+        .clipShape(RoundedRectangle(cornerRadius: plan.base * 0.022, style: .continuous))
     }
 
     // MARK: - 固定 HUD
 
-    private func hud(metrics: ScrollMetrics) -> some View {
-        VStack(alignment: .trailing, spacing: metrics.base * 0.012) {
+    private func hud(_ plan: DisplayPlan) -> some View {
+        VStack(alignment: .trailing, spacing: plan.base * 0.012) {
             TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
                 Text(timeline.date, format: .dateTime.hour().minute().second())
-                    .font(.system(size: metrics.base * 0.1, weight: .thin, design: .monospaced))
+                    .font(.system(size: plan.base * 0.1, weight: .thin, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(.white.opacity(0.85))
             }
 
-            Text("滚动 \(Int(remote.scroll * 100))% · 缩放 \(String(format: "%.2f", remote.zoom))×")
-                .font(.system(size: metrics.base * 0.032, weight: .medium, design: .monospaced))
+            Text(readout)
+                .font(.system(size: plan.base * 0.032, weight: .medium, design: .monospaced))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.55))
 
             if let text = airMouseHudText {
                 Text(text)
-                    .font(.system(size: metrics.base * 0.032, weight: .medium, design: .monospaced))
+                    .font(.system(size: plan.base * 0.032, weight: .medium, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(LaserPalette.core.opacity(0.85))
             }
         }
-        .padding(metrics.base * 0.06)
+        .padding(plan.base * 0.06)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-        .shadow(color: .black.opacity(0.6), radius: metrics.base * 0.02)
+        .shadow(color: .black.opacity(0.6), radius: plan.base * 0.02)
+    }
+
+    private var readout: String {
+        var parts = [
+            "滚动 \(Int(remote.scroll * 100))%",
+            "缩放 \(String(format: "%.2f", remote.zoom))×"
+        ]
+        if remote.pull > 0 {
+            parts.append("下拉 \(Int(remote.pull * 100))%")
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - 光标与轻点反馈
@@ -212,31 +301,41 @@ struct ExternalDisplayRootView: View {
     /// 两者共用 `RemoteControl.pointer` 这一个落点，只是外观不同 ——
     /// 这样"谁在动"就完全由 `pointerSource` 决定，不需要两套坐标互相同步。
     @ViewBuilder
-    private func pointer(metrics: ScrollMetrics) -> some View {
+    private func pointer(_ plan: DisplayPlan) -> some View {
         if let pointer = remote.pointer {
             switch remote.pointerSource {
             case .touch:
-                touchCursor(at: pointer, metrics: metrics)
+                touchCursor(at: pointer, plan: plan)
             case .airMouse:
-                laserCursor(at: pointer, metrics: metrics)
+                laserCursor(at: pointer, plan: plan)
             }
         }
     }
 
+    /// 星海的视差倾斜，归一化 `-1...1`。
+    ///
+    /// **只由空鼠驱动**。空鼠的物理动作就是"抬手转动手机"，那正是视差的来源；
+    /// 触控板上手指的位置和"视角"没有任何物理关系 —— 拿它做视差会让
+    /// 星海在滚动时跟着乱晃，纯属错配。
+    private var parallaxTilt: CGPoint {
+        guard remote.pointerSource == .airMouse, let pointer = remote.pointer else { return .zero }
+        return CGPoint(x: (pointer.x - 0.5) * 2, y: (pointer.y - 0.5) * 2)
+    }
+
     // MARK: 触控板光标
 
-    private func touchCursor(at pointer: CGPoint, metrics: ScrollMetrics) -> some View {
-        let diameter = metrics.base * 0.1
+    private func touchCursor(at pointer: CGPoint, plan: DisplayPlan) -> some View {
+        let diameter = plan.base * 0.1
         return ZStack {
             Circle().fill(LaserPalette.touch.opacity(0.22))
-            Circle().stroke(LaserPalette.touch, lineWidth: max(1.5, metrics.base * 0.007))
+            Circle().stroke(LaserPalette.touch, lineWidth: max(1.5, plan.base * 0.007))
             Circle()
                 .fill(LaserPalette.touch)
                 .frame(width: diameter * 0.18, height: diameter * 0.18)
         }
         .frame(width: diameter, height: diameter)
-        .position(point(pointer, in: metrics))
-        .shadow(color: .black.opacity(0.6), radius: metrics.base * 0.015)
+        .position(point(pointer, in: plan))
+        .shadow(color: .black.opacity(0.6), radius: plan.base * 0.015)
     }
 
     // MARK: 激光光标
@@ -248,12 +347,12 @@ struct ExternalDisplayRootView: View {
     /// 再套一层会二次偏移。拖尾是铺满视口的 `Canvas`，自己按归一化坐标换算，
     /// 同样不参与这条 `.position` 约定。
     @ViewBuilder
-    private func laserCursor(at pointer: CGPoint, metrics: ScrollMetrics) -> some View {
-        let unit = metrics.base * 0.1
-        let center = point(pointer, in: metrics)
+    private func laserCursor(at pointer: CGPoint, plan: DisplayPlan) -> some View {
+        let unit = plan.base * 0.1
+        let center = point(pointer, in: plan)
 
         // 1. 拖尾
-        laserTrailCanvas(metrics: metrics)
+        laserTrailCanvas(plan)
 
         // 2. 光晕
         Circle()
@@ -295,9 +394,9 @@ struct ExternalDisplayRootView: View {
     /// `Circle`。拖尾随光标每帧重算，而空鼠是 60 Hz；10 个模糊图层意味着外接屏
     /// 每个采样周期都要重新合成 10 次离屏模糊 —— 在 4K 外接屏上是实打实的掉帧源。
     /// 描边一次就没有这层开销，且省掉了每段的布局抖动。
-    private func laserTrailCanvas(metrics: ScrollMetrics) -> some View {
-        let unit = metrics.base * 0.1
-        let points = laserTrail.map { point($0, in: metrics) }
+    private func laserTrailCanvas(_ plan: DisplayPlan) -> some View {
+        let unit = plan.base * 0.1
+        let points = laserTrail.map { point($0, in: plan) }
 
         return Canvas { context, _ in
             guard points.count >= 2 else { return }
@@ -321,7 +420,7 @@ struct ExternalDisplayRootView: View {
                 )
             }
         }
-        .frame(width: metrics.viewport.width, height: metrics.viewport.height)
+        .frame(width: plan.scroll.viewport.width, height: plan.scroll.viewport.height)
         .allowsHitTesting(false)
     }
 
@@ -348,14 +447,14 @@ struct ExternalDisplayRootView: View {
 
     // MARK: 涟漪
 
-    private func ripple(metrics: ScrollMetrics) -> some View {
-        let center = remote.pointer.map { point($0, in: metrics) }
-            ?? CGPoint(x: metrics.viewport.width / 2, y: metrics.viewport.height / 2)
+    private func ripple(_ plan: DisplayPlan) -> some View {
+        let center = remote.pointer.map { point($0, in: plan) }
+            ?? CGPoint(x: plan.scroll.viewport.width / 2, y: plan.scroll.viewport.height / 2)
         let color = remote.pointerSource == .airMouse ? LaserPalette.core : LaserPalette.touch
 
         return Circle()
-            .stroke(color, lineWidth: max(2, metrics.base * 0.01))
-            .frame(width: metrics.base * 0.22, height: metrics.base * 0.22)
+            .stroke(color, lineWidth: max(2, plan.base * 0.01))
+            .frame(width: plan.base * 0.22, height: plan.base * 0.22)
             .scaleEffect(rippleScale)
             .opacity(rippleOpacity)
             .position(center)
@@ -394,10 +493,10 @@ struct ExternalDisplayRootView: View {
 
     // MARK: - 几何与文案
 
-    private func point(_ normalized: CGPoint, in metrics: ScrollMetrics) -> CGPoint {
+    private func point(_ normalized: CGPoint, in plan: DisplayPlan) -> CGPoint {
         CGPoint(
-            x: normalized.x * metrics.viewport.width,
-            y: normalized.y * metrics.viewport.height
+            x: normalized.x * plan.scroll.viewport.width,
+            y: normalized.y * plan.scroll.viewport.height
         )
     }
 
@@ -428,35 +527,30 @@ private enum LaserPalette {
     static let touch = Color.orange
 }
 
-/// 外接屏内容的滚动几何。
+/// 只有**顶边**带圆角的矩形。
 ///
-/// 手机端只传归一化进度，实际位移在这里按画面尺寸换算 —— 这样同一份
-/// 手机端状态在 1080p / 4K / 模拟器 letterbox 小窗口上都成立。
-private struct ScrollMetrics {
+/// 内容容器下拉时会伸出屏幕下沿，底角永远在视口之外；
+/// 用 `RoundedRectangle` 会连底角一起切，白白多两次绘制。
+private struct TopRoundedRect: Shape {
 
-    let base: CGFloat
-    let viewport: CGSize
-    let rowCount: Int
+    var cornerRadius: CGFloat
 
-    var inset: CGFloat { base * 0.08 }
-    var headerHeight: CGFloat { base * 0.26 }
-    var rowHeight: CGFloat { base * 0.115 }
-    var rowSpacing: CGFloat { base * 0.012 }
-    var contentWidth: CGFloat { viewport.width - inset * 2 }
-
-    /// 标题 + 所有行的高度（不含内边距）。
-    var contentHeight: CGFloat {
-        headerHeight + CGFloat(rowCount) * (rowHeight + rowSpacing)
+    var animatableData: CGFloat {
+        get { cornerRadius }
+        set { cornerRadius = newValue }
     }
 
-    /// 含四周内边距的完整高度，即需要滚动的总长度。
-    var totalHeight: CGFloat { contentHeight + inset * 2 }
-
-    /// 滚到底时内容需要上移的距离。
-    var maxOffset: CGFloat { max(0, totalHeight - viewport.height) }
-
-    func offset(for scroll: CGFloat) -> CGFloat {
-        maxOffset * min(max(scroll, 0), 1)
+    func path(in rect: CGRect) -> Path {
+        Path(
+            roundedRect: rect,
+            cornerRadii: RectangleCornerRadii(
+                topLeading: cornerRadius,
+                bottomLeading: 0,
+                bottomTrailing: 0,
+                topTrailing: cornerRadius
+            ),
+            style: .continuous
+        )
     }
 }
 

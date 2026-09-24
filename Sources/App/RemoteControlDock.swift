@@ -102,6 +102,11 @@ struct RemoteControlDock: View {
             "滚动 \(Int(remote.scroll * 100))%",
             "缩放 \(String(format: "%.2f", remote.zoom))×"
         ]
+        // 下拉是"隐藏"状态：没下拉时不占地方，一旦发生就必须能看见 ——
+        // 否则背景墙露出后用户会以为画面出错了。
+        if remote.pull > 0 {
+            parts.append("下拉 \(Int(remote.pull * 100))%")
+        }
         if airMouse.isRunning {
             var text = "空鼠\(airMouse.state.title)"
             if let usable = airMouse.warmup.milestones.usable {

@@ -37,6 +37,11 @@ struct ExternalDisplayDemoApp: App {
                     // 首次挂载就走一次，不依赖 scenePhase 的初始跳变。
                     MockExternalDisplay.shared.bootstrap()
 
+                    // 调试用：从启动参数预置视口状态（下拉 / 滚动 / 缩放 / 光标）。
+                    // `simctl` 没有触摸注入 API，没有这一步就没法脚本化地
+                    // 逐状态截图核对下拉几何。无参数时是 no-op。
+                    MockRemoteState.applyIfNeeded()
+
                     // 与 `-mockExternalDisplay` 同一约定：带了 mock 参数就直接进入该模式，
                     // 否则这个参数要用户手动点开遥控台 → 切到空鼠 → 点启动才生效。
                     if MockAirMouseSource.isEnabled {

@@ -34,6 +34,7 @@ struct RemoteControlPad: View {
         VStack(spacing: 14) {
             trackpad
             zoomSlider
+            pullSlider
             buttons
         }
         .padding(.vertical, 4)
@@ -51,6 +52,7 @@ struct RemoteControlPad: View {
                 if !isDragging && !isMagnifying {
                     VStack(spacing: 4) {
                         Text("单指拖动 → 滚动外接屏")
+                        Text("顶部继续下拉 → 露出星海背景墙")
                         Text("双指捏合 → 缩放（模拟器按住 Option）")
                             .foregroundStyle(.tertiary)
                     }
@@ -78,16 +80,31 @@ struct RemoteControlPad: View {
     }
 
     /// 右侧的滚动位置指示条，和外接屏上的进度一一对应。
+    ///
+    /// 下拉时额外从顶端往**下**画一段青色条：它的长度就是背景墙露出的高度，
+    /// 与橙色滚动块方向相反。两者同框，手指往哪边拽、画面发生什么，一眼能对上。
     private func scrollIndicator(size: CGSize) -> some View {
         let trackWidth: CGFloat = 4
         let knobHeight: CGFloat = 30
         let travel = max(0, size.height - knobHeight - 16)
+        let x = size.width - trackWidth - 10
+        let maxPullLength = size.height * 0.5
 
-        return Capsule()
-            .fill(Color.orange.opacity(0.75))
-            .frame(width: trackWidth, height: knobHeight)
-            .offset(x: size.width - trackWidth - 10, y: 8 + travel * remote.scroll)
-            .allowsHitTesting(false)
+        return ZStack(alignment: .topLeading) {
+            if remote.pull > 0 {
+                Capsule()
+                    .fill(Color.cyan.opacity(0.85))
+                    .frame(width: trackWidth, height: max(6, maxPullLength * remote.pull))
+                    .offset(x: x, y: 8)
+            }
+
+            Capsule()
+                .fill(Color.orange.opacity(0.75))
+                .frame(width: trackWidth, height: knobHeight)
+                .offset(x: x, y: 8 + travel * remote.scroll)
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .allowsHitTesting(false)
     }
 
     // MARK: - 手势
@@ -153,6 +170,32 @@ struct RemoteControlPad: View {
             )
             Image(systemName: "plus.magnifyingglass")
                 .foregroundStyle(.secondary)
+        }
+        .font(.footnote)
+    }
+
+    /// 下拉滑杆 —— 背景墙的露出比例。
+    ///
+    /// 存在的理由和缩放滑杆一样：模拟器里手势不好做，真机上也有"精确调到某个
+    /// 露出比例"的需求。它同时是验证下拉几何最省事的入口：拖到底就是
+    /// 「内容顶边落在屏幕中线」那个几何承诺。
+    private var pullSlider: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "rectangle.bottomhalf.inset.filled")
+                .foregroundStyle(remote.pull > 0 ? Color.cyan : Color.secondary)
+
+            Slider(
+                value: Binding(
+                    get: { remote.pull },
+                    set: { remote.pull(to: $0) }
+                ),
+                in: 0...1
+            )
+
+            Text("\(Int(remote.pull * 100))%")
+                .font(.footnote.monospacedDigit())
+                .foregroundStyle(remote.pull > 0 ? Color.cyan : Color.secondary)
+                .frame(width: 42, alignment: .trailing)
         }
         .font(.footnote)
     }

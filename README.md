@@ -179,24 +179,42 @@ if #available(iOS 27.0, *) {
 ExternaldisplayDemo/
 ├── project.yml                                    XcodeGen 配置（XcodeGen 2.46+）
 ├── Support/Info.plist                             scene manifest 在这里
+├── docs/
+│   ├── mock-external-display.md                   -mockExternalDisplay 的原理（可发布）
+│   └── devnotes/                                  分支级实验记录
 └── Sources/
     ├── App/
     │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）+ accessory 声明
     │   ├── PhoneRootView.swift                    状态面板 + 推送内容控制
     │   ├── RemoteControlPad.swift                 手机端遥控板（手势采集）
-    │   └── RemoteControlDock.swift                底部常驻遥控台（safeAreaInset 宿主）
+    │   ├── RemoteControlDock.swift                底部常驻遥控台（safeAreaInset 宿主）
+    │   ├── AirMousePad.swift                      空鼠模式的控制面板
+    │   └── AirMouseDiagnostics.swift              陀螺仪预热/可用性读数
     ├── Core/
     │   ├── ExternalDisplayMonitor.swift           连接状态记录（@Observable，三个数据源）
     │   ├── DisplayContentStore.swift              共享内容状态（「选什么」）
-    │   └── RemoteControl.swift                    共享交互状态（「怎么看」）
+    │   ├── RemoteControl.swift                    共享交互状态（「怎么看」）
+    │   ├── AirMouse.swift                         手机姿态 → 激光指针
+    │   └── MotionWarmup.swift                     CoreMotion 预热与可用性判定
     ├── ExternalDisplay/
     │   ├── ExternalDisplayAccessory.swift         ★ iOS 27 的 scene accessory 声明（纯 SwiftUI）
     │   ├── ExternalDisplaySceneDelegate.swift     ★ iOS 17~26 的接入落点
     │   ├── ExternalDisplayRootView.swift          外接屏根视图（纯输出，无手势，自测量分辨率）
-    │   └── DisplayPatternCanvas.swift             逐帧渲染验证
+    │   ├── DisplayPatternCanvas.swift             逐帧渲染验证
+    │   ├── WaterfallLayout.swift                  瀑布流布局（纯计算，可独立断言）
+    │   ├── WaterfallColumnView.swift              瀑布流视图
+    │   ├── DisplayScrollGeometry.swift            滚动/下拉几何 + 手感曲线（纯计算）
+    │   ├── StarfieldModel.swift                   星表 + 透视投影（纯计算，可独立断言）
+    │   └── StarfieldBackdrop.swift                星海背景墙（TimelineView + Canvas）
     └── Debug/
-        └── MockExternalDisplay.swift              模拟器替身（不参与真机链路）
+        ├── MockExternalDisplay.swift              模拟器替身（不参与真机链路）
+        ├── MockAirMouseSource.swift               陀螺仪替身
+        └── MockRemoteState.swift                  从启动参数预置视口状态，供截图验证
 ```
+
+`WaterfallLayout` / `DisplayScrollGeometry` / `StarfieldModel` 三个文件**只依赖
+`CoreGraphics` 与 `Foundation`**，不认识 SwiftUI —— 这是刻意设计的，见第九节。
+
 
 数据流：手机端改 `DisplayContentStore` → 外接屏 `ExternalDisplayRootView` 自动重绘。
 两侧是**同一进程内的两个 UIScene，共享内存**，不需要任何跨进程通道。
@@ -233,8 +251,10 @@ RemoteControlPad   ──写──▶   RemoteControl    ──读──▶  Ext
 | 手势 | 手机端采集 | 外接屏响应 |
 | --- | --- | --- |
 | 单指拖动 | `DragGesture`，逐帧增量归一化 | 内容列按 `scroll` 偏移；手指落点画成橙色光标环 |
-| 双指捏合 | `MagnifyGesture` | 图案画布 `.scaleEffect(zoom)` |
+| 单指继续下拉 | 同一个 `DragGesture`，越过顶部后自动转成 `pull` | 内容整体下移，露出星海背景墙（见第九节） |
+| 双指捏合 | `MagnifyGesture` | hero 图案画布 `.scaleEffect(zoom)` |
 | 轻点 | 按钮 | 光标处扩散一次涟漪 |
+| 转动手机 | `CoreMotion`（`AirMouse`） | 红色激光指针 + 拖尾；同时驱动星海视差 |
 
 三个实现要点：
 
@@ -243,6 +263,7 @@ RemoteControlPad   ──写──▶   RemoteControl    ──读──▶  Ext
   `ScrollMetrics` 按自身内容高度换算实际位移，同一份手机端状态在哪块屏上都成立。
 - **拖拽增量要自己算**。`DragGesture` 的 `translation` 是**累计值**，直接当增量用会让滚动速度
   随拖拽时长不断放大，必须减掉上一次的值。`MagnifyGesture` 的 `magnification` 同理。
+- **滚动与下拉是同一个标量的两段**，不是两个维度。见第九节。
 - **`.frame()` 不指定对齐会居中**。滚动内容高度（本工程约 446pt）远超视口（约 203pt），
   `.frame(width:height:)` 默认居中会把内容上移半个差值 —— 表现是「滚动起点就少了两条内容」。
   必须写 `alignment: .topLeading`，再靠 `.clipped()` 裁掉溢出。
@@ -330,6 +351,16 @@ open ExternalDisplayDemo.xcodeproj
     系统恢复上一次安装持久化下来的 `UISceneSession`，里面**存着旧委托类**；旧类已经不在
     二进制里 → 该 role 拿不到可用委托 → **启动屏白屏转纯黑屏**，进程存活、不崩溃、**零日志**。
     **覆盖安装不会自愈**，必须卸载重装。复现与排查见第八节末。
+15. **让某个子视图刻意超出父视图之后，忘了父级 `.frame` 也要 `alignment: .topLeading`** →
+    与第 10 条同一类：`.frame(width:height:)` 默认**居中**，子视图比它大时会被顶掉半个差值。
+    第 10 条只修了内层容器，这次把外层约束拆掉，同一个 bug 换了个层级复现。
+    **这个坑与具体层级无关，只与"是否有子视图会超出父视图"有关。**
+16. **布局没有遵守从几何反推出来的约束**（如「hero 高度 ≤ 视口高/2 − 内边距」）→
+    表现是"下拉到底之后标题被屏幕下沿切掉半截"，看起来像渲染 bug，查错方向很容易跑偏。
+    正确做法是把约束写成函数让布局直接受它约束，而不是写一条注释提醒。
+17. **给 `@Observable` 类的默认参数写 `.shared`** → 默认参数表达式在**调用方**上下文求值，
+    触发「main actor-isolated property can not be referenced from a nonisolated context」告警。
+    改成 `= nil` 再在函数体里解析。
 
 ---
 
@@ -494,3 +525,83 @@ Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两�
 > 3. iOS 17~26 的 plist + scene delegate 路径在本机无法实测。
 > 4. 自测量的两个前提 ——「accessory 内容铺满外接屏」与「其 `displayScale` 就是外接屏的
 >    scale」—— 都是按 API 语义推断的，同样没有画面证据。
+
+---
+
+## 九、瀑布流 + 下拉露背景墙 + 星海
+
+完整设计推导、踩坑与实测数据见
+[`docs/devnotes/2026-09-24-waterfall-starfield.md`](docs/devnotes/2026-09-24-waterfall-starfield.md)。
+这里只留结论。
+
+### 滚动仍然是"假滚动"
+
+外接屏用不了 `ScrollView`（第四节），所以瀑布流也是手写 `.offset` 驱动的：
+
+```swift
+.offset(y: plan.scroll.contentOffset(scroll: remote.scroll, pull: pull))
+```
+
+全项目**没有任何 `UIScrollView` 参与滚动**。UIKit 只出现在宿主层。
+
+### 滚动与下拉是同一个标量的两段
+
+原来的 `scroll` 被 clamp 在 `0...1`，表达不了"已经在顶部还继续往下拽"。
+但这两件事其实是同一条数轴上的两段，所以内部只留一个权威标量：
+
+```
+position > 0  →  正常滚动进度
+position < 0  →  顶部下拉的超出行程
+```
+
+对外暴露 `scroll` 与 `pull`，但**唯一权威只有 `position`**。
+拆成两个可独立写的存储属性的话，下拉时被阻尼吃掉的那部分行程，
+在回拉时会变成凭空多出来的滚动 —— 手指一松内容就跳。
+
+手感曲线 `1 - (1 - t)^1.7` 起手轻快、末段发沉，且在 `t = 1` 处**恰好取到 1**
+（不是渐近逼近）—— 否则「内容顶边落在屏幕中线」这个几何承诺永远差一截。
+
+### 瀑布流为什么不用 LazyVGrid
+
+`LazyVGrid` 是**等高网格**：同一行的 cell 高度取该行最高的那个，剩下的用空白补齐。
+那是「网格」不是「瀑布流」。真瀑布流要求每列的项独立堆叠、互不对齐。
+
+本工程的实现是贪心分列（每项放进当前最矮的列），写成纯函数放在 `WaterfallLayout`，
+高度用**权重**而不是点数（`unitHeight = 画面短边 × 0.20`），列数按宽高比选（16:9 用 4 列，
+4:3 用 3 列）。卡片配色走"锚点 + 抖动"，刻意绕开黄绿区间。
+
+### 星海：假 3D 的关键是"压缩过的透视"
+
+教科书式的 `scale = focal / depth` 会把深度差放大成巨大的尺度差 ——
+近处的星被推出画面、远处的星全挤在中心，**整片星海变成隧道而不是穹顶**。
+纯分层平移又只剩平移视差，看不出纵深。
+
+所以位置与尺寸**分别压缩**：
+
+```swift
+let positionScale = pow(focal / depth, 0.35)   // 0.82...1.35
+let sizeScale     = pow(focal / depth, 0.60)   // 0.76...1.79
+```
+
+尺寸的指数更大，因为"远小近大"是大脑判断深度最强的单一线索。
+
+劳斯莱斯质感另有六条：穹顶底色、亮度幂律分布、每颗星独立闪烁相位（**同步呼吸是"假"的
+第一来源**）、最亮 3% 的十字光芒、尺寸与亮度正相关、深度衰减。
+
+### 可验证性
+
+三个纯计算文件（`WaterfallLayout` / `DisplayScrollGeometry` / `StarfieldModel`）
+**只依赖 `CoreGraphics` 与 `Foundation`**，因此可以用 `swiftc` 独立编译跑断言 ——
+目前 **85 条全过**。这是刻意设计的：`simctl` 没有触摸注入 API，
+「手势 → 状态」那半条链路只能手点，但「状态 → 布局/投影」这半条可以真正断言，
+而它恰好是最容易算错的部分。
+
+为了让「状态 → 渲染」那半条也可脚本化，新增了 `-remoteState` 启动参数：
+
+```bash
+xcrun simctl launch <device> <bundle> -mockExternalDisplay -remoteState pull=0.5
+xcrun simctl launch <device> <bundle> -mockExternalDisplay -remoteState scroll=0.3,pull=0.25,zoom=1.5
+```
+
+与 `-mockExternalDisplay` 同一约定：只在带启动参数时生效，不参与真机链路。
+它伪造的是**输入**，不是度量。
