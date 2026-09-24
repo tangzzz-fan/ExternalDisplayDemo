@@ -26,6 +26,8 @@ import Foundation
 ///     -remoteState pointer=0.3:0.4,selected=7
 /// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay -remoteState lateral=-1
 /// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay -remoteState bottom=1
+/// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay -remoteState detail=7
+/// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay -remoteState detail=7:fill,pan=0:1
 /// ```
 ///
 /// `selected` 写的是 `RemoteControl.selectedItemID`（瀑布流卡片的选中态）。
@@ -36,6 +38,11 @@ import Foundation
 /// 两者都是"三条位移轴"里靠手势才能到达的状态，同样必须先能预置，
 /// 否则幕墙推到边缘时的几何（有没有被推出屏外、那几个角的圆角对不对）
 /// 就只剩肉眼看一遍。
+///
+/// `detail=<id>` 直接进照片详情页；加 `:fill` 后缀则进"铺满"模式
+/// （`detail=7:fill`）。`pan=x:y` 是该页的归一化行程进度（`0` 居中、`±1` 两端）——
+/// 这一条是详情页能被截图验证的**全部依据**：拖拽是连续手势，
+/// 没有它就只能手划一遍，而"拖到边界时照片有没有露白"恰恰是最容易错的地方。
 ///
 /// 也支持 `-remoteState pull=0.5` 这种不带 `=` 的写法（与 `-mockExternalDisplayAspect`
 /// 的解析保持一致）。
@@ -69,6 +76,9 @@ enum MockRemoteState {
         var zoom: CGFloat?
         var pointer: CGPoint?
         var selectedItemID: Int?
+        var detailItemID: Int?
+        var detailMode: PhotoViewMode?
+        var detailPan: CGSize?
     }
 
     /// 解析 `key=value` 列表，逗号分隔。无法识别的键直接忽略 ——
@@ -103,6 +113,19 @@ enum MockRemoteState {
                 }
             case "selected":
                 state.selectedItemID = Int(value)
+            case "detail":
+                // `detail=7` 进详情页（整图）；`detail=7:fill` 直接进铺满模式。
+                let parts = value.split(separator: ":").map(String.init)
+                if let id = Int(parts.first ?? "") {
+                    state.detailItemID = id
+                    if parts.count > 1 { state.detailMode = parts[1] == "fill" ? .fill : .fit }
+                }
+            case "pan":
+                // `pan=x:y`，与 `pointer` 同理用冒号分隔。
+                let components = value.split(separator: ":").compactMap { Double($0) }
+                if components.count == 2 {
+                    state.detailPan = CGSize(width: components[0], height: components[1])
+                }
             default:
                 continue
             }
@@ -153,6 +176,18 @@ enum MockRemoteState {
         // 与"先指过去、再点确认"的实际顺序一致。
         if let selected = state.selectedItemID {
             remote.select(item: selected)
+        }
+        // 详情页相关的三个键必须排在**所有幕墙状态之后**：`openDetail` 会
+        // 重置 `detailMode` 与 `detailPan`，先设它们就会被随后的一次
+        // `openDetail` 抹掉（与 `bottom` 必须排在 `scroll` 之后是同一种次序问题）。
+        if let detail = state.detailItemID {
+            remote.openDetail(item: detail)
+            if state.detailMode == .fill {
+                remote.toggleDetailMode()
+            }
+        }
+        if let pan = state.detailPan {
+            remote.setDetailPan(pan)
         }
     }
 }

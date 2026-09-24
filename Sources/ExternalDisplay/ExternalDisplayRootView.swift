@@ -113,7 +113,18 @@ struct ExternalDisplayRootView: View {
                     isAnimated: store.isAnimated
                 )
 
-                contentColumn(plan)
+                if let item = detailItem {
+                    PhotoDetailView(
+                        item: item,
+                        viewport: plan.scroll.viewport,
+                        base: plan.base,
+                        mode: remote.detailMode,
+                        pan: remote.detailPan,
+                        onClampPan: { remote.setDetailPan($0) }
+                    )
+                } else {
+                    contentColumn(plan)
+                }
 
                 hud(plan)
 
@@ -135,6 +146,10 @@ struct ExternalDisplayRootView: View {
             // 挂在 GeometryReader **内部**：选中判定要问 `plan` 当前命中的是哪一张卡，
             // 而 `plan` 是这一层闭包里的局部值，外层拿不到。
             .onChange(of: remote.tapCount) { _, _ in handleTap(in: plan) }
+            // 双击与单击是两个独立的计数，各自幂等 —— `onChange` 的触发顺序
+            // 不可控，若合成一条就得在渲染侧反推"这次算单还是双"，那是把判定
+            // 搬到了一个无法断言的地方。见 `RemoteControl.doubleTapCount`。
+            .onChange(of: remote.doubleTapCount) { _, _ in handleDoubleTap() }
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
@@ -644,6 +659,16 @@ struct ExternalDisplayRootView: View {
     ///
     /// 指针不在屏上（`pointer == nil`）时直接返回 `nil` —— 触控板与空鼠
     /// 两条路都靠这个判断"现在没有焦点"，不需要再分模式。
+    /// 当前正在看的照片；`nil` 表示停在幕墙页。
+    ///
+    /// 共享状态里只存 id（`RemoteControl` 在 `Core` 层，不该认识照片数据），
+    /// 真正的数据在渲染侧 —— 所以这里做一次查表，而查不到时按"没在详情页"
+    /// 处理：一个失效的 id 不该把整屏变成空白。
+    private var detailItem: WaterfallItem? {
+        guard let id = remote.detailItemID else { return nil }
+        return Self.items.first { $0.id == id }
+    }
+
     private func focusedItem(in plan: DisplayPlan) -> Int? {
         guard let pointer = remote.pointer else { return nil }
         return plan.focus.item(
@@ -662,30 +687,44 @@ struct ExternalDisplayRootView: View {
         return plan.backButton.contains(point(pointer, in: plan))
     }
 
-    /// 轻点 / 扳机。
+    /// 轻点 / 扳机（单击路径）。
     ///
-    /// **返回按钮优先于卡片**：按钮压在幕墙之上，指针在它里面的时候，
-    /// 底下那张卡不该抢走这次点击。按钮的判定区比卡片小得多，
-    /// 优先判它不会让卡片的命中变"粘"。
-    ///
-    /// 按钮的动作目前只记一条事件 —— "点了之后跳到哪一页"还没有定论
-    /// （见 `docs/specs/glass-wall-gesture.md` 的 D5），这一段刻意留空，
-    /// 不拿一个猜测出来的页面顶上。
+    /// 优先级：**返回按钮 > 详情页 > 卡片命中**。
+    /// 按钮压在内容之上，指针在它里面的时候，底下的东西不该抢走这次点击；
+    /// 它的判定区比卡片小得多，优先判它不会让卡片的命中变"粘"。
     private func handleTap(in plan: DisplayPlan) {
         if focusedBackButton(in: plan) {
-            remote.noteBackButton()
+            if remote.detailItemID != nil {
+                // 详情页里它是"退出"，这是它一直缺的那个动作 ——
+                // 之前只记一条事件，因为外接屏没有导航栈，"回到哪一页"
+                // 只有需求方能定（见 `docs/specs/glass-wall-gesture.md` 的 D5）。
+                // 现在有了一页可回，它才接上。
+                remote.closeDetail()
+            } else {
+                remote.noteBackButton()
+            }
             return
         }
-        toggleSelection(in: plan)
+
+        // 详情页里的单击**刻意什么都不做**：它必须为双击让路。
+        // 若这里去做点别的（比如退出详情），双击的第一击就会先生效，
+        // 第二击再切模式 —— 用户看到的会是"退出又进去"，像失灵。
+        guard remote.detailItemID == nil else { return }
+
+        openDetail(in: plan)
     }
 
-    /// 把当前命中的卡片设为选中，再确认同一张则取消。
+    /// 双击路径：切换查看模式（整图 ↔ 铺满）。不在详情页时 `RemoteControl` 会忽略。
+    private func handleDoubleTap() {
+        remote.toggleDetailMode()
+    }
+
+    /// 幕墙页的单击：指针命中的那张卡就是"这张照片"，直接进详情。
     ///
-    /// 指针没落在任何卡片上时**不动选中** —— 空白处点一下不该把已经选好的东西
-    /// 丢掉；而"取消"已经有"再点同一张"这条明确路径，不必再占一个手势。
-    private func toggleSelection(in plan: DisplayPlan) {
+    /// 指针没落在任何卡片上时不动 —— 空白处点一下不该把已经选好的东西丢掉。
+    private func openDetail(in plan: DisplayPlan) {
         guard let focused = focusedItem(in: plan) else { return }
-        remote.select(item: remote.selectedItemID == focused ? nil : focused)
+        remote.openDetail(item: focused)
     }
 
     // MARK: - 几何与文案

@@ -182,7 +182,10 @@ ExternaldisplayDemo/
 ├── docs/
 │   ├── mock-external-display.md                   -mockExternalDisplay 的原理（可发布）
 │   ├── external-display-screenshot.md             外接屏内容怎么截图（搬移→抓屏→裁切→探针）
+│   ├── photo-detail.md                            照片详情页：整图/铺满、双击切换、拖拽
+│   ├── portable-effects.md                        可移植清单：带走哪些文件/文档、替换什么
 │   ├── scroll-feel.md                             上下滑动为什么跟手（体感角度）
+│   ├── starfield.md                               照片星星海：假 3D 穹顶的投影、星表、绘制与验证
 │   ├── specs/
 │   │   └── glass-wall-gesture.md                  玻璃幕墙手势：需求拆解、决策清单、分期
 │   └── devnotes/                                  分支级实验记录
@@ -191,7 +194,8 @@ ExternaldisplayDemo/
 │       ├── 2026-09-24-waterfall-starfield.md      瀑布流 + 下拉露背景墙 + 星海假 3D
 │       ├── 2026-09-24-waterfall-inset-focus.md    瀑布流左右边距 + item 焦点环
 │       ├── 2026-09-24-trackpad-two-finger.md      触摸板双指滚动（UIKit 触摸层）
-│       └── 2026-09-24-glass-wall-material-back.md 玻璃幕墙：半透材质 + 返回按钮
+│       ├── 2026-09-24-glass-wall-material-back.md 玻璃幕墙：半透材质 + 返回按钮
+│       └── 2026-09-25-photo-detail-zoom.md        照片详情页（口径、随机序列错位、编译超时）
 └── Sources/
     ├── App/
     │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）+ accessory 声明
@@ -205,8 +209,9 @@ ExternaldisplayDemo/
     ├── Core/
     │   ├── ExternalDisplayMonitor.swift           连接状态记录（@Observable，三个数据源）
     │   ├── DisplayContentStore.swift              共享内容状态（「选什么」）
-    │   ├── RemoteControl.swift                    共享交互状态（「怎么看」）
+    │   ├── RemoteControl.swift                    共享交互状态（「怎么看」+ 当前在哪一页）
     │   ├── PadGesture.swift                       ★ 手势状态机 + 滚动策略（纯逻辑，可独立断言）
+    │   ├── TapSequence.swift                      ★ 跨会话的单/双击判定（纯值类型，可独立断言）
     │   ├── AirMouse.swift                         手机姿态 → 激光指针
     │   └── MotionWarmup.swift                     CoreMotion 预热与可用性判定
     ├── ExternalDisplay/
@@ -217,6 +222,8 @@ ExternaldisplayDemo/
     │   ├── WaterfallLayout.swift                  瀑布流布局 + 左右边距几何（纯计算，可独立断言）
     │   ├── WaterfallFocus.swift                  指针 → 卡片的命中判定（纯计算，可独立断言）
     │   ├── WaterfallColumnView.swift              瀑布流视图（左右留白，每列完整，卡片半透）
+    │   ├── PhotoDetailGeometry.swift              详情页几何：整图/铺满、可平移量、夹取（纯计算，可独立断言）
+    │   ├── PhotoDetailView.swift                  详情页渲染（只画，不算几何；每帧回写夹取）
     │   ├── DisplayScrollGeometry.swift            纵向滚动/过卷几何 + 手感曲线（纯计算）
     │   ├── LateralGeometry.swift                 横向推开几何 + 手感曲线（纯计算，可独立断言）
     │   ├── BackButtonGeometry.swift              返回按钮的圆与命中（纯计算，可独立断言）
@@ -229,9 +236,9 @@ ExternaldisplayDemo/
         └── MockRemoteState.swift                  从启动参数预置视口状态，供截图验证
 ```
 
-`WaterfallLayout` / `WaterfallFocus` / `DisplayScrollGeometry` / `LateralGeometry` /
-`BackButtonGeometry` / `StarfieldModel` 这些文件**只依赖 `CoreGraphics` 与 `Foundation`**，
-不认识 SwiftUI —— 这是刻意设计的，见第九节。
+`WaterfallLayout` / `WaterfallFocus` / `PhotoDetailGeometry` / `DisplayScrollGeometry` /
+`LateralGeometry` / `BackButtonGeometry` / `StarfieldModel` / `TapSequence` 这些文件
+**只依赖 `CoreGraphics` 与 `Foundation`**，不认识 SwiftUI —— 这是刻意设计的，见第九节。
 
 
 数据流：手机端改 `DisplayContentStore` → 外接屏 `ExternalDisplayRootView` 自动重绘。
@@ -242,7 +249,7 @@ ExternaldisplayDemo/
 | 状态 | 回答的问题 | 写入方 | 读取方 |
 | --- | --- | --- | --- |
 | `DisplayContentStore` | 外接屏**显示什么** | 手机端表单 | `ExternalDisplayRootView` |
-| `RemoteControl` | 外接屏**怎么看**（滚动 / 缩放 / 光标） | 手机端手势采集面（`GesturePad`） | `ExternalDisplayRootView` |
+| `RemoteControl` | 外接屏**怎么看**（滚动 / 缩放 / 光标 / 当前在哪一页） | 手机端手势采集面（`GesturePad`） | `ExternalDisplayRootView` |
 
 ---
 
@@ -268,16 +275,20 @@ GesturePad           ──写──▶   RemoteControl    ──读──▶  E
   MagnifyGesture                bottomPull / lateral     .scaleEffect()
   CoreMotion                    pointer / tapCount       laser cursor
                                 selectedItemID ◀──写── 卡片的命中判定
+                                detailItemID /           PhotoDetailView
+                                detailMode /             （当前在哪一页）
+                                detailPan     ◀──写── 详情页的夹取回写
 ```
 
 | 手势 | 手机端采集 | 外接屏响应 |
 | --- | --- | --- |
 | **单指移动**（触控板） | `TouchSurface`，落点即时映射 | 橙色光标环跟手移动，**画面不动** |
 | **双指滑动**（触控板） | 同上，取两指**质心**的逐帧位移 | 幕墙按主轴位移：纵向滚动，横向推开（见第九节） |
-| **单指上下拖动**（空鼠栏） | 同上，单指即滚动 | 同上 |
+| **单指上下拖动**（空鼠栏） | 同上，单指即滚动 | 同上。**详情页里则是平移照片**（见第十节） |
 | 继续下拉 / 上拉 | 同上，越过顶部转成 `pull`、越过底部转成 `bottomPull` | 幕墙整体下移 / 上移，露出星海（见第九节） |
 | 横向推开 | 同上，首次越过 slop 的那条轴独占本次会话 | 幕墙整体左移 / 右移，让出的一侧露出星海 |
-| 单指轻点 | 同上，位移未越过 slop（8pt）且**全程只有一根手指** | 命中返回按钮则记一条事件，否则切换卡片选中态 |
+| 单指轻点 | 同上，位移未越过 slop（8pt）且**全程只有一根手指** | 命中返回按钮 → 记事件或退出详情；否则命中卡片 → **进详情**；详情页里则不做事 |
+| **双击**（两次轻点间隔 ≤ 0.32s） | 同上，或空鼠扳机快速按两下 | 详情页里切换 `整图 ↔ 铺满`（见第十节） |
 | 转动手机 | `CoreMotion`（`AirMouse`） | 红色激光指针 + 拖尾；同时驱动星海视差 |
 | 双指捏合 | `MagnifyGesture`，**仅触控板** | hero 图案画布 `.scaleEffect(zoom)` |
 | 手指落点 → 光标环 | **仅触控板**（空鼠栏 `mapsPointer: false`） | 橙色光标环 |
@@ -958,16 +969,30 @@ let sizeScale     = pow(focal / depth, 0.60)   // 0.76...1.79
 劳斯莱斯质感另有六条：穹顶底色、亮度幂律分布、每颗星独立闪烁相位（**同步呼吸是"假"的
 第一来源**）、最亮 3% 的十字光芒、尺寸与亮度正相关、深度衰减。
 
+星海的**完整文档**在这里：[`docs/starfield.md`](docs/starfield.md) ——
+投影常量与实测系数范围、星表参数与分布实测、三条绘制路径与帧预算、
+停帧判据与代价、34 条断言、已知盲区、搬迁须知。
+
 ### 可验证性
 
-四个纯计算文件（`WaterfallLayout` / `DisplayScrollGeometry` / `StarfieldModel` /
-`PadGesture`）**只依赖 `CoreGraphics` 与 `Foundation`**，因此可以用 `swiftc` 独立编译跑断言 ——
-目前 **162 条全过**。这是刻意设计的：`simctl` 没有触摸注入 API，
+**七个**纯计算文件（`WaterfallLayout` / `WaterfallFocus` / `DisplayScrollGeometry` /
+`LateralGeometry` / `StarfieldModel` / `BackButtonGeometry` / `PadGesture`）
+**只依赖 `CoreGraphics` 与 `Foundation`**，因此可以用 `swiftc` 独立编译跑断言 ——
+目前 **366 条全过**。这是刻意设计的：`simctl` 没有触摸注入 API，
 「手势 → 状态」那半条链路只能手点，但「状态 → 布局/投影」这半条可以真正断言，
 而它恰好是最容易算错的部分。
 
-`PadGesture` 是后来补进来的第四个（见第四节）：它把「手指按下 → 产生什么动作」
-这半条也变成了可断言的（27 条）。仍然只能手点的只剩「SwiftUI 的手势分发本身」。
+`PadGesture` 是后来补进来的：它把「手指按下 → 产生什么动作」
+这半条也变成了可断言的。仍然只能手点的只剩「触摸有没有被 UIKit 收到」这一层。
+
+`TapSequence` 与 `PhotoDetailGeometry` 是最近补进来的：前者把「两次轻点算不算双击」
+变成可断言的，后者把详情页的两种适配口径变成可断言的 —— 它们都是纯值类型/纯函数，
+所以照旧能进这套脚本（见第十节）。
+
+这九个文件**零外部代码引用**（实测：对上层符号的匹配全部落在注释里），
+所以可以整批搬到别的项目 —— 想搬走这套效果的话，见
+[`docs/portable-effects.md`](docs/portable-effects.md)（含 24 个文件的清单、5 处必改项、
+以及「哪些文档讲什么」）。
 
 为了让「状态 → 渲染」那半条也可脚本化，有两个预置参数：
 
@@ -988,3 +1013,70 @@ xcrun simctl launch <device> <bundle> -mockExternalDisplay -dockState=expanded,t
 
 两者都与 `-mockExternalDisplay` 同一约定：只在带启动参数时生效，不参与真机链路。
 它们伪造的都是**输入**，不是度量。
+
+---
+
+## 十、照片详情页：整图 / 铺满 + 双击 + 拖拽
+
+点一张卡进去，看到的是一张**照片**。默认完整可见，双击放大到铺满，拖着看剩下的部分，
+再双击回来。完整说明见 [`docs/photo-detail.md`](docs/photo-detail.md)，这里只列几条
+不该被改掉的骨架。
+
+### 口径不是「高度 fit / 宽度 fit」
+
+需求最初的说法是「默认高度 fit，双击变 width fit」。对横屏外接屏 + 横构图照片它是对的 ——
+与 `min` / `max` 缩放恰好重合。但竖构图照片在"宽度适配到底"下会被拉成 2.37 倍视口高的竖条。
+
+所以口径是两个**与照片形状无关**的模式：
+
+| 模式 | 缩放 | 含义 | 横构图照片上 |
+| --- | --- | --- | --- |
+| `fit`（整图） | `min` | 完整可见，不足一侧留黑 | = 高度贴边 |
+| `fill`（铺满） | `max` | 消除黑边，超出裁掉、可拖 | = 宽度贴边 |
+
+这两个词**作为命名**一处都没出现 —— 界面上叫「整图」「铺满」；它们只在
+「解释为什么不这么叫」的语境里被引用过。
+
+### 三种"进入 / 切换 / 退出"动作分别落在哪
+
+| 动作 | 落点 | 为什么 |
+| --- | --- | --- |
+| 进详情 | `RemoteControl.openDetail(item:)` | 复用幕墙已有的命中判定，卡片命中写的是同一张卡的 id |
+| 切模式 | `RemoteControl.toggleDetailMode()` | 换模式时**清空行程**：同一个进度在两种模式下对应的像素位移完全不同 |
+| 退出 | `RemoteControl.closeDetail()` | 刻意**不动** `position` / `lateralRaw` —— 幕墙的滚动位置是用户进来之前自己滚到的，返回时原样呈现才对 |
+
+**详情页里的单击刻意什么都不做**：它必须为双击让路。否则双击的第一击会先生效
+（比如退出详情），第二击再切模式，用户看到的是"退出又进去"，像失灵。
+
+### 双击判定为什么不在手势层
+
+`TapSequence` 是一个只吃时间的纯值类型，判定点落在 `RemoteControl.tap()` ——
+因为「确认」有**三条**入口（触控板轻点 / 空鼠栏轻点 / 空鼠扳机），它们都汇聚到那里。
+放在手势层的话，空鼠扳机那条路永远双击不起来，而那恰恰是举着手机时最自然的手势。
+
+双击天然**跨会话**：两次轻点分属两次「按下 → 抬起」，中间隔着一次完整的状态机复位，
+而 `PadGesture` 每次会话结束都会 `reset()` 清空全部状态 —— 时间戳留在那里会被一起清掉。
+
+### 手机端夹不住的那一半
+
+手机端只知道手指走了多少，**不知道外接屏多大**。所以它只能保守夹 `-1...1`；
+真正可达的行程取决于视口尺寸 + 照片宽高比 + 模式，全在渲染侧。
+
+于是渲染侧**每帧夹一次并回写**（`PhotoDetailView.onChange(of: pan)` →
+`PhotoDetailGeometry.clamped(_:)` → `RemoteControl.setDetailPan(_:)`）。
+不回写的话，`fit` 模式下手机端攒下的行程要用户反向拖一段才消化掉 —— 表现为**卡住**。
+回写是**幂等**的，不形成更新循环。
+
+`setDetailPan` 是本类里第二条「外接屏 → 模型」的写入（第一条是卡片命中写回 `selectedItemID`）。
+
+### 调试预置
+
+```bash
+xcrun simctl launch <device> <bundle> -mockExternalDisplay -remoteState detail=7
+xcrun simctl launch <device> <bundle> -mockExternalDisplay -remoteState detail=7:fill
+xcrun simctl launch <device> <bundle> -mockExternalDisplay -remoteState detail=7:fill,pan=0:1
+```
+
+`detail=<id>` 直接进详情页，`:fill` 后缀进铺满模式，`pan=x:y` 是归一化行程进度。
+详情相关的三个键**必须排在所有幕墙状态之后**：`openDetail` 会重置模式与行程，
+先设就会被随后的 `openDetail` 抹掉（与 `bottom` 必须排在 `scroll` 之后是同一种次序问题）。

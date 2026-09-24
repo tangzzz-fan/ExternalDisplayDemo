@@ -52,7 +52,7 @@ struct RemoteControlPad: View {
                 GesturePadHint(text: "单指移动 → 移动光标"),
                 GesturePadHint(text: "双指上下 → 滚动 / 顶部下拉 / 底部上拉"),
                 GesturePadHint(text: "双指左右 → 推开幕墙，露出星海"),
-                GesturePadHint(text: "轻点 → 点击确认"),
+                GesturePadHint(text: "轻点 → 打开照片；详情页双击 → 铺满"),
                 GesturePadHint(text: "双指捏合 → 缩放（模拟器按住 Option）", isSecondary: true)
             ],
             scrollGesture: .twoFinger,

@@ -124,15 +124,20 @@ struct AirMousePad: View {
     /// 腾出第二根手指去滑面板既别扭又会带歪姿态，单指是这里唯一顺手的做法。
     /// 代价是纵向与横向都由这一根手指承担，于是必须靠**主轴锁定**分流
     /// （见 `PadGesture`）—— 手指横着走就推幕墙、竖着走就滚动，不会一起动。
+    ///
+    /// 高度 190 同样是为了**行程**：空鼠姿态下手臂本来就在晃，
+    /// 采集面太矮会让每一次拖动都落在"一动就过头"的区间里。
+    /// 它比触控板那一块略矮 —— 这一栏上面还有状态行、归零/扳机两个大按钮
+    /// 与灵敏度、参考系两组控件，预算比触控板紧。
     private var gesturePad: some View {
         GesturePad(
             hints: [
-                GesturePadHint(text: "轻点面板 → 点击确认（等同扳机）"),
+                GesturePadHint(text: "轻点面板 → 确认；详情页双击 → 铺满"),
                 GesturePadHint(text: "单指上下 → 滚动 / 顶部下拉 / 底部上拉"),
                 GesturePadHint(text: "单指左右 → 推开幕墙，露出星海"),
                 GesturePadHint(text: "抬手转动手机 → 移动激光", isSecondary: true)
             ],
-            height: 120,
+            height: 190,
             mapsPointer: false,
             scrollGesture: .oneFinger,
             onTap: { confirm() }

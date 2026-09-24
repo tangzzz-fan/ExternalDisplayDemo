@@ -132,6 +132,90 @@ final class RemoteControl {
         lastEvent = id.map { "选中第 \($0) 项" } ?? "取消选中"
     }
 
+    // MARK: - 照片详情页
+
+    /// 当前正在查看的照片（`nil` = 停在幕墙页）。
+    ///
+    /// 这就是"当前在哪一页"的**唯一**依据 —— 渲染侧按它决定画幕墙还是画照片，
+    /// 拖拽动作也按它分流（见 `scroll(by:)`）。不额外维护一个页面枚举：
+    /// 两个来源描述同一件事，迟早会有一处忘了同步，而症状是"明明在详情页
+    /// 却把幕墙滚走了"，看起来像手势错乱。
+    private(set) var detailItemID: Int?
+
+    /// 详情页的查看模式：整图（默认）或铺满。
+    private(set) var detailMode: PhotoViewMode = .fit
+
+    /// 详情页照片的**归一化行程进度**，各分量 `-1...1`。
+    ///
+    /// 存进度而不是像素：手机端不知道外接屏多大，像素行程由渲染侧按
+    /// `PhotoDetailGeometry` 算（与 `position` 存归一化进度同一条规矩）。
+    ///
+    /// 这里的夹取是**保守**的（只保证 `-1...1`）：真正可达的范围取决于
+    /// 照片宽高比、视口尺寸与查看模式，三者都在渲染侧。渲染侧每帧会用
+    /// `PhotoDetailGeometry.clamped(_:)` 夹一次并回写（见 `setDetailPan`），
+    /// 于是"某个方向根本不可拖"时手机端不会攒下一堆要回拉才能抵消的行程。
+    private(set) var detailPan: CGSize = .zero
+
+    /// 双击次数。渲染侧靠它的变化触发一次查看模式切换。
+    ///
+    /// 与 `tapCount` 分成两个计数而不是让渲染侧去推断"这次是单还是双"：
+    /// `onChange` 的顺序不可控，两个独立的计数让两条分支各自幂等。
+    private(set) var doubleTapCount: Int = 0
+
+    /// 点击序列。跨会话的记忆在这里，不在 `PadGesture` 里（见那个类型的文档）。
+    private var tapSequence = TapSequence()
+
+    /// 进入某张照片的详情页。
+    func openDetail(item id: Int) {
+        select(item: id)
+        detailItemID = id
+        detailMode = .fit
+        detailPan = .zero
+        lastEvent = "查看第 \(id) 张"
+    }
+
+    /// 退出详情，回幕墙。
+    ///
+    /// 刻意**不动** `position` / `lateralRaw`：幕墙的滚动位置是用户进来之前
+    /// 自己滚到的，返回时原样呈现才对。详情页的平移量是另一套量，见 `detailPan`。
+    func closeDetail() {
+        guard detailItemID != nil else { return }
+        detailItemID = nil
+        detailMode = .fit
+        detailPan = .zero
+        lastEvent = "返回幕墙"
+    }
+
+    /// 切换查看模式（双击触发）。不在详情页时什么都不做。
+    func toggleDetailMode() {
+        guard detailItemID != nil else { return }
+        detailMode = detailMode.toggled
+        // 换适配口径之后原来的行程没有意义了：同一个进度值在两种模式下
+        // 对应的像素位移完全不同，留着它会让照片"跳"到某个奇怪的位置。
+        detailPan = .zero
+        lastEvent = detailMode == .fill ? "铺满显示" : "整图显示"
+    }
+
+    /// 由渲染侧回写夹取后的行程（见 `PhotoDetailGeometry.clamped(_:)`）。
+    ///
+    /// 这是本类里第二条「外接屏 → 模型」的写入（第一条是 `select(item:)`
+    /// 的命中结果）。之所以必须有：手机端做不了这个夹取，而攒下不可达的
+    /// 行程会让反向拖动"粘住"一段才响应。
+    func setDetailPan(_ pan: CGSize) {
+        guard detailItemID != nil, pan != detailPan else { return }
+        detailPan = pan
+    }
+
+    /// 详情页里的拖动：只改 `detailPan`，不碰幕墙的位置。
+    private func panDetail(by delta: CGSize) {
+        detailPan = CGSize(
+            width: Self.clamp(detailPan.width + delta.width, -1, 1),
+            height: Self.clamp(detailPan.height + delta.height, -1, 1)
+        )
+    }
+
+    // MARK: - 文案与初始化
+
     /// 最近一次离散手势的说明，手机端面板上直读。
     private(set) var lastEvent: String = "等待操作"
 
@@ -143,8 +227,20 @@ final class RemoteControl {
     ///
     /// 方向约定跟手指走：手指上滑 `dy < 0` → 内容上移 → 进度增大。
     /// 越过顶部后自动转成下拉、越过底部后自动转成上拉，调用方不需要自己判断边界。
+    ///
+    /// ## 在详情页里它改的是照片平移
+    /// 同一个手指动作落到哪个量上，取决于当前在哪一页。分流点选在这里
+    /// 而不是手势层：手势层（`PadGesture`）是纯状态机，它不认识页面；
+    /// 渲染层则是纯输出，不该持有可写状态。本类本来就是"所有输入的汇聚点"，
+    /// 由它按页面决定去向，调用方一行都不用改。
     func scroll(by dy: CGFloat) {
         guard dy != 0 else { return }
+
+        if detailItemID != nil {
+            panDetail(by: CGSize(width: 0, height: dy))
+            return
+        }
+
         let next = min(
             max(position - dy, -PullCurve.rawLimit),
             1 + PullCurve.rawLimit
@@ -205,6 +301,13 @@ final class RemoteControl {
     /// 原因是纵向送的是"进度增量"、横向送的是"位移本身"，两者本来就不是一种量。
     func lateral(by dx: CGFloat) {
         guard dx != 0 else { return }
+
+        // 与 `scroll(by:)` 同一条分流规则：详情页里它推的是照片。
+        if detailItemID != nil {
+            panDetail(by: CGSize(width: dx, height: 0))
+            return
+        }
+
         let next = Self.clamp(lateralRaw + dx, -LateralCurve.rawLimit, LateralCurve.rawLimit)
 
         // 只在推满的那一刻记一次事件，避免逐帧刷屏
@@ -273,9 +376,24 @@ final class RemoteControl {
 
     // MARK: - 轻点
 
+    /// 一次确认。
+    ///
+    /// 双击判定在这里做，而不是在 `PadGesture` 里 —— 本方法是**所有**确认路径的
+    /// 汇聚点（面板轻点、空鼠扳机按钮、触控板上的兜底按钮），判定放在这里，
+    /// 三条路自动获得同一种行为。判据本身是纯值类型 `TapSequence`，可断言。
+    ///
+    /// `tapCount` 每次轻点都自增（双击也算两次）—— 它驱动的是涟漪反馈，
+    /// "点了几下"与"是不是双击"是两件事，后者归 `doubleTapCount`。
     func tap() {
         tapCount += 1
-        lastEvent = "轻点 #\(tapCount)"
+
+        switch tapSequence.registerTap(at: Date()) {
+        case .single:
+            lastEvent = "轻点 #\(tapCount)"
+        case .double:
+            doubleTapCount += 1
+            lastEvent = "双击 #\(doubleTapCount)"
+        }
     }
 
     // MARK: - 复位
@@ -287,6 +405,10 @@ final class RemoteControl {
         pointer = nil
         pointerSource = .touch
         selectedItemID = nil
+        detailItemID = nil
+        detailMode = .fit
+        detailPan = .zero
+        tapSequence = TapSequence()
         lastEvent = "已复位"
     }
 

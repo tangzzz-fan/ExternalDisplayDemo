@@ -45,9 +45,18 @@ struct WaterfallColumnView: View {
 
     /// 底栏文案。与 `WaterfallItem.captionCount` 一一对应，
     /// 取用时取模兜底，两处数量对不上也不会崩。
-    private static let captions = [
+    ///
+    /// 非 private：详情页要在同一张照片上显示同一个文案 ——
+    /// 从卡片点进去，标题却变了，看起来像点错了另一张。
+    static let captions = [
         "内容条目", "精选合集", "编辑推荐", "专题报道", "专栏文章", "图集速览"
     ]
+
+    /// 取某项的文案。取模兜底 —— 数据损坏时宁可显示成另一条文案，
+    /// 也不要让下标越界把整片内容崩掉。
+    static func caption(for item: WaterfallItem) -> String {
+        captions[item.captionIndex % captions.count]
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: metrics.columnSpacing) {

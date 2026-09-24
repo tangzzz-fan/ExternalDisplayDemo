@@ -28,6 +28,20 @@ struct WaterfallItem: Identifiable, Equatable, Sendable {
     /// 高度权重，`1.0` 对应 `WaterfallMetrics.unitHeight`。
     let heightWeight: CGFloat
 
+    /// 照片自身的宽高比（宽 / 高）。
+    ///
+    /// ## 为什么它与 `heightWeight` 必须是两件事
+    /// `heightWeight` 描述的是**卡片在墙上占多高** —— 那是幕墙的排布结果，
+    /// 一张横构图照片完全可以被排成一根竖条（那正是"错落"的来源）。
+    /// `aspectRatio` 描述的是**照片本身什么形状** —— 详情页按它决定
+    /// "整图"与"铺满"两种适配怎么算。
+    ///
+    /// 两者若合成一个值，详情页会把"卡片被排布拉长"误读成"照片是竖的"，
+    /// 于是所有长条卡在详情页里都变成竖构图照片。
+    ///
+    /// 接入真实相册之后，这个字段由图片资源本身给出。
+    let aspectRatio: CGFloat
+
     /// 卡片配色。
     let tone: WaterfallTone
 
@@ -301,14 +315,41 @@ extension WaterfallItem {
     static func demoItems(count: Int, seed: UInt64 = 20_260_924) -> [WaterfallItem] {
         guard count > 0 else { return [] }
         var generator = SeededGenerator(seed: seed)
+        // 照片自身属性（宽高比）走**独立**的随机源。见 `make(id:using:photo:)`。
+        var photoGenerator = SeededGenerator(seed: seed &+ Self.photoSeedSalt)
 
         return (1...count).map { index in
-            make(id: index, using: &generator)
+            make(id: index, using: &generator, photo: &photoGenerator)
         }
     }
 
-    /// 抽一张卡。所有随机量都在这里，顺序固定 → 同种子必然同结果。
-    private static func make<G: RandomNumberGenerator>(id: Int, using generator: inout G) -> WaterfallItem {
+    /// 照片属性随机源的种子偏移量。
+    ///
+    /// 只要它与 0 不同、与主种子不同即可 —— 目的是让两条序列不相关。
+    /// 取一个"看起来不像随手写"的常数，是为了将来有人调主种子时不会
+    /// 顺手把它也改成同一个数（那样两条序列会同步，等于没分开）。
+    private static let photoSeedSalt: UInt64 = 0x9E37_79B9_7F4A_7C15
+
+    /// 抽一张卡。
+    ///
+    /// ## 为什么照片属性必须用**另一个**随机源
+    /// 这条不是洁癖，是被基线检查抓出来的：
+    ///
+    /// 36 张卡共用一个 `SeededGenerator`（上一条只是"本张卡内部的字段顺序"，
+    /// 保不住"后续卡片的序列位置"）。所以无论把宽高比插在卡中间、还是追加在
+    /// 卡末尾，**每张卡都会多消耗一个随机数**，从第 2 张开始整个序列顺移一位，
+    /// 于是每张卡的高度与配色全变。实测就是这样：01 号卡一字未变，02 号起全部不同。
+    ///
+    /// 「追加在序列末尾就不会动到别人」是个**看起来对、实际不成立**的直觉 ——
+    /// 追加在末尾只保证本张卡前面那几路不变，代价照样由后面的卡承担。
+    ///
+    /// 分开之后，主序列的消耗与改动前**逐个相同**，`.scratch/shots/` 里
+    /// 逐状态截图的基线继续有效。
+    private static func make<G: RandomNumberGenerator, P: RandomNumberGenerator>(
+        id: Int,
+        using generator: inout G,
+        photo photoGenerator: inout P
+    ) -> WaterfallItem {
         // 长条：22% 的卡片额外加 0...0.85 的权重，把少数卡片拉到 2.75 上限。
         // 在这个量级上，最高的那些卡会从"横条"变成"竖条"（高度超过列宽），
         // 整片瀑布流的错落感主要就来自这几根。
@@ -316,20 +357,61 @@ extension WaterfallItem {
         let angle = roll(&generator) * 2 * .pi
         let start = gradientStart(for: angle)
 
+        // 下面七路与既有基线一一对应。写成显式局部量而不是留在参数列表里：
+        // Swift 不保证参数求值顺序，显式写出来才能让"谁先抽"一目了然。
+        let heightWeight = 0.55 + roll(&generator) * 1.35 + stretch
+        let tone = WaterfallTone.random(using: &generator)
+        let cornerScale = 0.55 + roll(&generator) * 0.90
+        // 高光从渐变起点抖出来：两者同侧，光源才是自洽的
+        let highlight = CGPoint(
+            x: clamp(start.x + (roll(&generator) - 0.5) * 0.22, 0.02, 0.98),
+            y: clamp(start.y + (roll(&generator) - 0.5) * 0.22, 0.02, 0.98)
+        )
+        let captionIndex = min(captionCount - 1, Int(roll(&generator) * CGFloat(captionCount)))
+        let isFeatured = roll(&generator) < 0.14
+
+        // 照片自身的形状来自另一条序列：它不影响主序列的消耗。
+        let aspectRatio = photoAspectRatio(forRoll: roll(&photoGenerator))
+
         return WaterfallItem(
             id: id,
-            heightWeight: 0.55 + roll(&generator) * 1.35 + stretch,
-            tone: WaterfallTone.random(using: &generator),
-            cornerScale: 0.55 + roll(&generator) * 0.90,
+            heightWeight: heightWeight,
+            aspectRatio: aspectRatio,
+            tone: tone,
+            cornerScale: cornerScale,
             gradientAngle: angle,
-            // 高光从渐变起点抖出来：两者同侧，光源才是自洽的
-            highlight: CGPoint(
-                x: clamp(start.x + (roll(&generator) - 0.5) * 0.22, 0.02, 0.98),
-                y: clamp(start.y + (roll(&generator) - 0.5) * 0.22, 0.02, 0.98)
-            ),
-            captionIndex: min(captionCount - 1, Int(roll(&generator) * CGFloat(captionCount))),
-            isFeatured: roll(&generator) < 0.14
+            highlight: highlight,
+            captionIndex: captionIndex,
+            isFeatured: isFeatured
         )
+    }
+
+    /// 照片宽高比的档位表：`(累计概率上界, 宽高比)`。
+    ///
+    /// 竖构图占 70%（相册里的常态）、方图 15%、横构图 15%。
+    /// 取**离散档位**而不是在某个区间上连续取值：真实照片的比例本来就是
+    /// 那几种（相机 3:4 / 2:3 / 16:9、手机竖拍 9:16），连续取值会造出
+    /// 一批现实中不存在的比例，而且档位让断言可以精确比对。
+    private static let aspectTiers: [(upperBound: CGFloat, ratio: CGFloat)] = [
+        (0.36, 3.0 / 4),
+        (0.60, 2.0 / 3),
+        (0.70, 9.0 / 16),
+        (0.85, 1.0),
+        (0.93, 4.0 / 3),
+        (0.97, 3.0 / 2),
+        (1.00, 16.0 / 9)
+    ]
+
+    /// 均匀随机数 → 宽高比。
+    ///
+    /// 抽成静态函数是为了让"档位映射"这件事本身可以断言 ——
+    /// 它决定了详情页会走 `fit` 的哪一组分支，算错的表现是
+    /// "某些照片的两种模式看起来一模一样"，在截图上极难发现。
+    static func photoAspectRatio(forRoll roll: CGFloat) -> CGFloat {
+        for tier in aspectTiers where roll < tier.upperBound {
+            return tier.ratio
+        }
+        return aspectTiers[aspectTiers.count - 1].ratio
     }
 
     /// 主渐变的归一化起点 / 终点。

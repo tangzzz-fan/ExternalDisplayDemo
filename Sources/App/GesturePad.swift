@@ -64,7 +64,17 @@ struct GesturePad: View {
     let hints: [GesturePadHint]
 
     /// 采集面高度。
-    var height: CGFloat = 168
+    ///
+    /// ## 为什么是 210 而不沿用原值 168
+    /// 采集面是**按行程**工作的：手指划过一段距离，画面才走完对应的一段。
+    /// 168pt 在手机面板里偏矮 —— 一次满行程要绷着手指划很短的一截，
+    /// 手感上就是"稍微一动就滚过头"。给高之后，同样的画面位移对应更长的
+    /// 手指行程，更容易停在想停的位置。
+    ///
+    /// 上限由遥控台的**高度预算**约束（展开后的总高见 `RemoteControlDock`
+    /// 的 `heightReporter`）：整块展开区要给上方的表单留出空间，
+    /// 再往上加就会把表单挤没。这个值是按预算取的，**没有做过人体工学实测**。
+    var height: CGFloat = 210
 
     /// 是否把手指落点同时映射为外接屏光标。
     ///
@@ -244,7 +254,7 @@ struct RemoteScrollIndicator: View {
                 GesturePadHint(text: "单指上下拖动 → 滚动外接屏"),
                 GesturePadHint(text: "抬手转动手机 → 移动激光", isSecondary: true)
             ],
-            height: 120,
+            height: 190,
             mapsPointer: false,
             scrollGesture: .oneFinger
         )

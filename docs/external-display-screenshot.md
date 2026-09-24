@@ -101,11 +101,21 @@ xcrun simctl io $DEV screenshot .scratch/shots/x.png
 | 参数 | 伪造什么 | 例子 |
 | --- | --- | --- |
 | `-mockExternalDisplay` | 外接屏存在 | （必给） |
-| `-remoteState` | 共享交互状态 | `scroll=0.3,pull=0.25,lateral=1,bottom=1,zoom=1.5,pointer=0.3:0.35,selected=7` |
+| `-remoteState` | 共享交互状态 | `scroll=0.3,pull=0.25,lateral=1,bottom=1,zoom=1.5,pointer=0.3:0.35,selected=7`<br>详情页：`detail=7` / `detail=7:fill` / `detail=7:fill,pan=0:1`（见 [`photo-detail.md`](photo-detail.md)） |
 | `-dockState` | 遥控台的展开状态与输入方式 | `expanded,airMouse` / `expanded,trackpad` |
 | `-mockExternalDisplayAspect` | 替身窗口的宽高比 | `4:3` |
 
 三者同一约定：**只在带启动参数时生效，不参与真机链路；伪造的是输入，不是度量。**
+
+> ⚠️ `-remoteState` 里键的**先后有顺序依赖**：`pull` → `scroll` → `bottom` → … →
+> `selected` → `detail` → `pan`。原因是这些设置函数会互相覆盖（`pull(to:)` 清掉滚动、
+> `openDetail` 重置模式与行程）。写反了不会报错，只是状态停在别处。
+
+### 定位替身窗口：一个更省事的工具
+
+`docs/photo-detail.md` 第六节介绍的 `.scratch/tools/bbox` 直接求橙色边框的**包围盒**，
+比本文第四节的"探针逐行扫"更省事 —— 窗口下沿被遥控台压住时，逐行扫会在中间断掉、
+算出错误的高度。两者都可以用，`bbox` 更快，探针更细。
 
 ---
 
@@ -114,35 +124,41 @@ xcrun simctl io $DEV screenshot .scratch/shots/x.png
 替身窗口的位置由 `MockExternalDisplay.letterboxedRect(in:aspect:reservedBottom:)` 算出，
 输入只有三个：`container`（scene 的 bounds）、`aspect`（默认 16:9）、`dockHeight`（遥控台实测上报）。
 
-代入本机（402 × 874 pt，`dockState=expanded` 时 `dockHeight ≈ 416 pt`）：
+代入本机（402 × 874 pt，`dockState=expanded` 时 `dockHeight ≈ 458 pt`）：
 
 ```
 container.insetBy(dx: 20, dy: 60)              → x:20  y:60  w:362  h:754
-available.height = 754 − 416 = 338
-宽度受限（362/338 = 1.07 < 16:9）→ height = 362 ÷ (16/9) = 203.6
+available.height = 754 − 458 = 296
+宽度受限（362/296 = 1.22 < 16:9）→ height = 362 ÷ (16/9) = 203.6
 
-窗口 frame（点） = (20, 60 + (338 − 203.6)/2, 362, 203.6)
-                = (20, 127.3, 362, 203.6)
-像素（×3）      = (60, 382, 1086, 610)
+窗口 frame（点） = (20, 60 + (296 − 203.6)/2, 362, 203.6)
+                = (20, 106.2, 362, 203.6)
+像素（×3）      = (60, 319, 1086, 611)
+（边框实际落在 y 319…928 共 610 行，第 611 行与背景混合后未达橙色阈值）
 ```
 
-**实测复核（探针扫该次截图）**：
+**实测复核**（`.scratch/tools/bbox` 扫 `detail-07-fit.png`）：
 
 | 边 | 实测像素 | 换算点 | 与公式 |
 | --- | --- | --- | --- |
 | 左（橙边起点） | 60 | 20.0 | `insetBy(dx: 20)` ✓ |
 | 右（橙边终点） | 1145 | 381.7 | `20 + 362 = 382` ✓ |
-| 上（橙边起点） | 382 | 127.3 | `60 + 67.3` ✓ |
-| 下（橙边终点） | 991 | 330.3 | `127.3 + 203.3` ✓ |
-| 尺寸 | **1086 × 610 px** | 362 × 203.3 pt | ✓ |
+| 上（橙边起点） | 319 | 106.3 | `60 + 46.2` ✓ |
+| 内容区上下沿 | 319…928 | 106.3…309.3 | 610 行 = 203.3 pt（矩形高 203.67 pt，差 1 行是抗锯齿）|
+| 尺寸 | **1086 × 610 行**（矩形 1086 × 611 px） | 362 × 203.67 pt | ✓ |
 
 > **免费的自检**：替身窗口在 `layout()` 里上报给 `ExternalDisplayMonitor` 的像素尺寸是
-> `rect.size × scale` —— 也就是 **1086 × 610 px**。这个数字会**渲染在画面里**
-> （hero 副标题那行「1086 × 610 px」）。所以只要它和实测裁切区一致，
+> `rect.size × scale` —— 也就是 **1086 × 611 px**。这个数字会**渲染在画面里**
+> （hero 副标题那行「1086 × 611 px」）。所以只要它和实测裁切区一致，
 > 「窗口位置算对了」与「上报的分辨率没撒谎」两件事就同时被确认了。
 
 ⚠️ **公式法依赖 `dockHeight`，而它是运行时上报的。** 遥控台展开/收起、切到空鼠栏（多一块手势面）
-都会改变它 —— 曾经写死 96 就出过事。所以**批量截图时优先用下面的实测法**。
+都会改变它 —— 曾经写死 96 就出过事。这份文档上方的例子用的还是
+`dockHeight ≈ 416`（当时手势面高 168pt）；手势面后来加到 210pt，实测
+`dockHeight ≈ 458`，窗口整体上移 **63 px**。
+
+**数字变了不重要，"每次都重新量"才重要** —— 所以批量截图时优先用下面的实测法，
+或者直接用 `.scratch/tools/bbox`（见 [`photo-detail.md`](photo-detail.md) 第六节）。
 
 ---
 
@@ -155,23 +171,24 @@ available.height = 754 − 416 = 338
 P=.scratch/tools/probe
 S=.scratch/shots/x.png
 
-PROBE_TOL=1 $P $S column 603 200 800    # → y 382...392  #CD7222  ← 上边
-PROBE_TOL=1 $P $S column 603 950 1120   # → y 980...991  #CD7222  ← 下边
+PROBE_TOL=1 $P $S column 603 200 800    # → y 319...330  #CD7222  ← 上边
+PROBE_TOL=1 $P $S column 603 850 1050   # → y 913...924  #CD7222  ← 下边
 PROBE_TOL=1 $P $S row    600   0 120    # → x  60...71   #CE7324  ← 左边
 PROBE_TOL=1 $P $S row    600 1080 1206  # → x 1080...1145 #BBB..→#F18028 ← 右边
 ```
 
-得到包围盒 `x 60..1145, y 382..991` 后，外扩 `m` pt 的裁切矩形是：
+得到包围盒 `x 60..1145, y 319..928` 后（**别照抄，每次重新量**），
+外扩 `m` pt 的裁切矩形是：
 
 ```
-x = (20 − m) × 3     y = (127.3 − m) × 3
-w = (362 + 2m) × 3   h = (203.3 + 2m) × 3
+x = (20 − m) × 3     y = (106.2 − m) × 3
+w = (362 + 2m) × 3   h = (203.67 + 2m) × 3
 ```
 
 取 `m = 10`（留出圆角与外发光）：
 
 ```bash
-.scratch/tools/crop $S .scratch/shots/x-crop.png 30 352 1146 670 1
+.scratch/tools/crop $S .scratch/shots/x-crop.png 30 289 1146 671 1
 ```
 
 **为什么要留余量**：窗口有 20pt 圆角、幕墙有浮起投影，贴着边框裁会把四角切掉 ——
