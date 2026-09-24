@@ -331,7 +331,7 @@ private var parallaxTilt: CGPoint {
 
 | 项 | 方法 | 结果 |
 | --- | --- | --- |
-| 纯函数断言 | `swiftc` 独立编译 + 运行 | **135 条全过**（见下） |
+| 纯函数断言 | `swiftc` 独立编译 + 运行 | **135 条全过**（见下。后加 `PadGesture` 的 27 条，现共 162 条，见 `2026-09-24-airmouse-gesture.md`） |
 | 构建 | `xcodebuild`（模拟器，deployment target 17.0） | 零错误零告警 |
 | 下拉几何 | 逐 pull 状态启动截图（0 / 0.25 / 0.5 / 0.75 / 1） | `pull = 1` 时内容顶边落在中线 ✔ |
 | 瀑布流 | 同上截图 | 四列错落，列首对齐，无溢出 ✔ |
@@ -372,6 +372,12 @@ private var parallaxTilt: CGPoint {
 `simctl` **没有触摸注入 API**，手机端的拖拽/捏合无法在自动化里复现。
 所以「手势 → 状态」这半条链路只能靠手点。为了让「状态 → 渲染」那半条可脚本化，
 新增了 `MockRemoteState`（`Sources/Debug/`）：
+
+> **后续进展**：这半条后来被补上了 —— 把「手指按下 → 产生什么动作」的判定
+> 抽成纯状态机 `PadGesture`（`Sources/Core/`）之后，slop 边界、轻点 vs 拖动、
+> 逐帧增量都能喂事件断言（27 条）。见
+> [`2026-09-24-airmouse-gesture.md`](2026-09-24-airmouse-gesture.md)。
+> 仍然只能手点的只剩「SwiftUI 的手势分发本身」。
 
 ```bash
 xcrun simctl launch <device> <bundle> -mockExternalDisplay -remoteState pull=0.5

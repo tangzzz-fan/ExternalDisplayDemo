@@ -229,7 +229,7 @@ ExternaldisplayDemo/
 | 状态 | 回答的问题 | 写入方 | 读取方 |
 | --- | --- | --- | --- |
 | `DisplayContentStore` | 外接屏**显示什么** | 手机端表单 | `ExternalDisplayRootView` |
-| `RemoteControl` | 外接屏**怎么看**（滚动 / 缩放 / 光标） | 手机端遥控板手势 | `ExternalDisplayRootView` |
+| `RemoteControl` | 外接屏**怎么看**（滚动 / 缩放 / 光标） | 手机端手势采集面（`GesturePad`） | `ExternalDisplayRootView` |
 
 ---
 
@@ -244,7 +244,9 @@ ExternaldisplayDemo/
 所以在外接屏的视图树里加 `ScrollView` 或 `.gesture` 是**无效的** —— 手势根本到不了那里。
 外接屏是纯输出设备，一切输入都必须从手机侧中继。
 
-本工程的做法：手机端加一块遥控板，手势在手机侧采集，经 `RemoteControl` 单向送到外接屏渲染视图。
+本工程的做法：手机端底部常驻一块遥控台，手势在手机侧采集，经 `RemoteControl`
+单向送到外接屏渲染视图。遥控台上有**两块手势采集面**（触控板 / 空鼠栏，见下），
+它们共用同一份判定逻辑。
 
 ```
    手机端手势                   共享状态                    外接屏渲染
@@ -256,21 +258,50 @@ GesturePad         ──写──▶   RemoteControl    ──读──▶  Ext
 
 | 手势 | 手机端采集 | 外接屏响应 |
 | --- | --- | --- |
-| 单指拖动 | `DragGesture`，逐帧增量归一化 | 内容列按 `scroll` 偏移；手指落点画成橙色光标环 |
-| 单指继续下拉 | 同一个 `DragGesture`，越过顶部后自动转成 `pull` | 内容整体下移，露出星海背景墙（见第九节） |
-| 单指轻点 | 同一个 `DragGesture`，位移未越过阈值 | 光标处扩散一次涟漪（点击确认） |
-| 双指捏合 | `MagnifyGesture` | hero 图案画布 `.scaleEffect(zoom)` |
+| **单指上下拖动** | `DragGesture`，逐帧增量归一化。**两块 `GesturePad` 都有**（触控板 / 空鼠栏） | 内容列按 `scroll` 偏移（见第九节） |
+| 单指继续下拉 | 同上，越过顶部后自动转成 `pull` | 内容整体下移，露出星海背景墙（见第九节） |
+| 单指轻点 | 同上，位移未越过 slop（8pt） | 光标处扩散一次涟漪（点击确认）。空鼠栏上等同按下「扳机」 |
 | 转动手机 | `CoreMotion`（`AirMouse`） | 红色激光指针 + 拖尾；同时驱动星海视差 |
-| 轻点空鼠栏面板 | 同一块 `GesturePad` | 同上，等同按下「扳机」 |
+| 双指捏合 | `MagnifyGesture`，**仅触控板** | hero 图案画布 `.scaleEffect(zoom)` |
+| 手指落点 → 光标环 | **仅触控板**（空鼠栏 `mapsPointer: false`） | 橙色光标环 |
+
+> 前四行是**两块采集面共有**的能力，后两行只有触控板有。
+> 换句话说：**空鼠栏不是"只能轻点"** —— 它和触控板一样能上下拖动滚动、能下拉露背景墙。
+> 它少的只是"手指落点当光标"和"双指捏合"，因为光标归陀螺仪、捏合与瞄准姿态无意义。
 
 ### 两块采集面，一份逻辑
 
 触控板（`RemoteControlPad`）与空鼠栏（`AirMousePad`）各有一块 `GesturePad`，
 差别只有三个参数：提示文案、高度、以及**落点要不要映射成光标**。
 
-空鼠栏为什么要那块面：空鼠的交互是「抬手瞄准 + 确认」，而确认原本只有一个「扳机」按钮。
+**滚动这条链路两块面完全一致**：上下拖动 → 逐帧增量 → `RemoteControl.scroll(by:)`，
+连 slop、归一化分母、逐帧增量算法都是同一份代码。做成一个视图而不是复制两份，
+就是为了让两处的手感**必然**一致 —— 复制的话迟早有一处被改了分母而另一处没跟上。
+
+空鼠栏为什么也要能滚：空鼠的交互是「抬手瞄准 + 确认」，而确认原本只有一个「扳机」按钮。
 但空鼠工作时手机是被**举起来**的，手指去够底部那个按钮既别扭、又会带歪姿态 ——
 瞄准的那只手没法稳定地去点一个具体控件。所以确认必须能落在手边的任意位置。
+顺带把"上下拖动滚动"也放进来，这样空鼠跑着的时候不必切回触控板那一栏。
+
+#### 为什么手指滑动不会把激光带歪
+
+空鼠跑着的时候，「抬手转手机 → 激光移动」和「手指在面板上上下滑 → 滚动」
+是**可以同时发生**的（一只手举着转、另一只手滑）。两者不打架，靠的是一条硬约束：
+
+```swift
+GesturePad(..., mapsPointer: false, ...)   // 空鼠栏
+```
+
+`mapsPointer: false` 让这块面**只产生 `.scroll`，永不写 `RemoteControl.pointer`**；
+而激光指针由 `AirMouse` 独占写入（每次调用都带 `source: .airMouse`）。
+两者写的是同一个字段的两条互斥路径，谁都不会覆盖谁。
+
+反过来说：如果空鼠栏也用默认的 `mapsPointer: true`，那么手指一碰面板
+激光就会**瞬移到手指落点**，与陀螺仪的姿态控制互相抢，表现是"瞄准时激光乱跳"。
+`pointerSource` 这个字段就是为这种归属问题准备的（见第五节）。
+
+注意这个开关**只影响落点，不影响轻点** —— 断言里单独守了这条
+（`mapsPointer = false 不影响轻点`）。
 
 ### 一个手势识别器同时管滚动和轻点
 
@@ -280,12 +311,15 @@ GesturePad         ──写──▶   RemoteControl    ──读──▶  Ext
 ```
 
 判定逻辑全在 `PadGesture`（`Sources/Core/`）这个**纯状态机**里，视图只负责转发。
-两个容易写错的点：
+三个容易写错的点：
 
 - **slop 内的位移必须被吃掉，不能补发**。不补发是"起手不跳"的前提；
   若反过来先滚动、抬起时再补一次点击，那么每次轻点都会顺带把画面推走几个点。
 - **逐帧增量必须用累计位移之差**。`DragGesture.translation` 是累计值，
   直接拿它当增量，滚动速度会随拖拽时长线性放大。
+- **只取纵向分量，但横向分量不拦截**。这就是"上下滑动（左右可以）"这句需求的全部含义：
+  斜着划照样能滚，只是横向那段不产生位移。若改成"只认纯竖向拖动"，
+  斜拖会被判成手势失败，手感立刻变粘。
 
 还有一条防误触：轻点要求按下时长 ≤ 0.4s。空鼠瞄准时手指自然搭在面板上很常见，
 抬手时误触发一次点击比漏掉一次更让人恼火。
@@ -293,13 +327,13 @@ GesturePad         ──写──▶   RemoteControl    ──读──▶  Ext
 完整推导、四个易错点与 27 条断言清单见
 [`docs/devnotes/2026-09-24-airmouse-gesture.md`](docs/devnotes/2026-09-24-airmouse-gesture.md)。
 
-三个实现要点：
+其余实现要点：
 
 - **存归一化值，不存像素位移**。外接屏可能是 1080p / 4K / 模拟器里 362×203pt 的 letterbox
   小窗口，尺寸差一个数量级。`RemoteControl.scroll` 存 `0...1` 的进度，外接屏侧用
   `ScrollMetrics` 按自身内容高度换算实际位移，同一份手机端状态在哪块屏上都成立。
-- **拖拽增量要自己算**。`DragGesture` 的 `translation` 是**累计值**，直接当增量用会让滚动速度
-  随拖拽时长不断放大，必须减掉上一次的值。`MagnifyGesture` 的 `magnification` 同理。
+- **拖拽增量要自己算**（`MagnifyGesture` 的 `magnification` 同理，也是累计值；
+  单指那一路的算法见上）。
 - **滚动与下拉是同一个标量的两段**，不是两个维度。见第九节。
 - **`.frame()` 不指定对齐会居中**。滚动内容高度（本工程约 446pt）远超视口（约 203pt），
   `.frame(width:height:)` 默认居中会把内容上移半个差值 —— 表现是「滚动起点就少了两条内容」。
@@ -617,6 +651,15 @@ Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两�
 
 全项目**没有任何 `UIScrollView` 参与滚动**。UIKit 只出现在宿主层。
 
+这条链路的两端：
+
+| 端 | 在哪 | 干什么 |
+| --- | --- | --- |
+| 输入 | `GesturePad`（第四节，**触控板与空鼠栏各一块**） | 手指上下拖动 → `PadGesture` → `RemoteControl.scroll(by:)` |
+| 输出 | `ExternalDisplayRootView` | 读 `remote.scroll` / `pull` → 算 `.offset(y:)` |
+
+本节只讲**输出端**的几何；输入端（slop、逐帧增量、两块面的差异）在第四节。
+
 ### 滚动与下拉是同一个标量的两段
 
 原来的 `scroll` 被 clamp 在 `0...1`，表达不了"已经在顶部还继续往下拽"。
@@ -699,19 +742,31 @@ let sizeScale     = pow(focal / depth, 0.60)   // 0.76...1.79
 
 ### 可验证性
 
-三个纯计算文件（`WaterfallLayout` / `DisplayScrollGeometry` / `StarfieldModel`）
-**只依赖 `CoreGraphics` 与 `Foundation`**，因此可以用 `swiftc` 独立编译跑断言 ——
-目前 **162 条全过**（另加 `PadGesture`，见第四节）。
-这是刻意设计的：`simctl` 没有触摸注入 API，
+四个纯计算文件（`WaterfallLayout` / `DisplayScrollGeometry` / `StarfieldModel` /
+`PadGesture`）**只依赖 `CoreGraphics` 与 `Foundation`**，因此可以用 `swiftc` 独立编译跑断言 ——
+目前 **162 条全过**。这是刻意设计的：`simctl` 没有触摸注入 API，
 「手势 → 状态」那半条链路只能手点，但「状态 → 布局/投影」这半条可以真正断言，
 而它恰好是最容易算错的部分。
 
-为了让「状态 → 渲染」那半条也可脚本化，新增了 `-remoteState` 启动参数：
+`PadGesture` 是后来补进来的第四个（见第四节）：它把「手指按下 → 产生什么动作」
+这半条也变成了可断言的（27 条）。仍然只能手点的只剩「SwiftUI 的手势分发本身」。
+
+为了让「状态 → 渲染」那半条也可脚本化，有两个预置参数：
 
 ```bash
+# 预置共享交互状态（滚动 / 下拉 / 缩放 / 光标）
 xcrun simctl launch <device> <bundle> -mockExternalDisplay -remoteState pull=0.5
 xcrun simctl launch <device> <bundle> -mockExternalDisplay -remoteState scroll=0.3,pull=0.25,zoom=1.5
+
+# 预置遥控台的展开状态与输入方式（-dockState=expanded,airMouse）
+xcrun simctl launch <device> <bundle> -mockExternalDisplay -dockState=expanded,airMouse
+xcrun simctl launch <device> <bundle> -mockExternalDisplay -dockState=expanded,trackpad
 ```
 
-与 `-mockExternalDisplay` 同一约定：只在带启动参数时生效，不参与真机链路。
-它伪造的是**输入**，不是度量。
+`-dockState` 解决的是另一个盲区：遥控台默认收起、默认停在「触控板」那一栏，
+而这两件事都只能靠手指点 —— 于是**空鼠栏的布局在自动化里完全看不到**。
+把它变成启动参数后，空鼠栏也能进入逐状态截图流程。
+（只认 `expanded` / `airMouse` / `trackpad` 三个记号，见 `MockDockState`。）
+
+两者都与 `-mockExternalDisplay` 同一约定：只在带启动参数时生效，不参与真机链路。
+它们伪造的都是**输入**，不是度量。

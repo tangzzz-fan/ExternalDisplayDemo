@@ -179,12 +179,65 @@ mutating func ended(time: Date) -> [Action] {
 | `height` | 自适应 | 固定 120pt |
 | `mapsPointer` | `true` —— 落点画成橙色光标环 | `false` —— 光标归陀螺仪管 |
 
-`mapsPointer: false` 是空鼠栏的要点：如果手势面也去写 `remote.pointer`，
-手指一碰面板激光就会瞬移到手指落点，和陀螺仪的姿态控制互相打架。
-但**它不影响轻点** —— 断言里单独守了这条。
+### 4.1 上下滑动这条链路，两块面完全一致
+
+需求第一句是「空鼠部分也需要支持手势上下滑动」。这条链路上两块面**没有任何差异**：
+
+```
+手指上下拖
+   │
+   ▼  DragGesture(minimumDistance: 0)          GesturePad
+translation（累计）
+   │
+   ▼  delta = translation - lastTranslation     PadGesture
+归一化 delta.height / padSize.height
+   │
+   ▼  .scroll(dy)
+RemoteControl.scroll(by:)                      RemoteControl
+   │
+   ▼  position -= dy（clamp 到 -rawLimit...1）
+scroll / pull（计算属性）
+   │
+   ▼  plan.scroll.contentOffset(scroll:pull:)   ExternalDisplayRootView
+.offset(y:)
+```
+
+slop、归一化分母（采集面**自身**高度）、逐帧增量算法、方向约定，全是同一份代码。
+做成一个视图而不是复制两份，就是为了让两处的手感**必然**一致 ——
+复制的话迟早有一处被改了分母而另一处没跟上，而症状（"空鼠栏滑得比触控板快"）
+离原因（另一个文件里的一行除法）很远。
+
+顺带说一句归一化分母的选择：用**采集面自身高度**而不是外接屏高度。
+两者尺寸差一个数量级（120pt vs 1080p），但 `RemoteControl.position` 存的是
+**进度**（`0...1`）而不是像素 —— 所以分母用哪块屏的尺寸都不影响最终结果，
+用采集面高度只是让"拖过整个面板 = 拖过整屏"这个手感更直白。
+
+### 4.2 两路输入怎么隔离
+
+空鼠跑着的时候，「抬手转手机 → 激光移动」和「手指在面板上上下滑 → 滚动」
+是**可以同时发生**的（一只手举着转、另一只手滑）。两者不打架，靠的是一条硬约束：
+
+```swift
+GesturePad(..., mapsPointer: false, ...)   // 空鼠栏
+```
+
+`mapsPointer: false` 让这块面**只产生 `.scroll`，永不写 `RemoteControl.pointer`**；
+而激光指针由 `AirMouse` 独占写入（每次调用都带 `source: .airMouse`）。
+两条互斥路径写同一个字段，谁都不会覆盖谁。
+
+反过来说：如果空鼠栏也用默认的 `mapsPointer: true`，手指一碰面板
+激光就会**瞬移到手指落点**，与陀螺仪的姿态控制互相抢，
+表现是"瞄准时激光乱跳"——很容易被当成陀螺仪噪声去查错方向。
+
+注意这个开关**只影响落点，不影响轻点** —— 断言里单独守了这条
+（`mapsPointer = false 不影响轻点`）。落点映射是**立即**的、不受 slop 约束，
+而 slop 只管滚动；两者在同一个状态机里分开处理。
+
+### 4.3 确认动作分情况
 
 空鼠栏的确认动作还要分情况：空鼠在跑就走 `airMouse.trigger()`（计入扳机计数，
-和按扳机是同一条路径），没跑就退回 `remote.tap()`。
+和按扳机是同一条路径），没跑就退回 `remote.tap()` ——
+免得这块面板在空鼠没启动时变成哑巴。
 
 ```swift
 private func confirm() {
