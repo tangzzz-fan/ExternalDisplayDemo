@@ -136,6 +136,21 @@ struct WaterfallMetrics: Equatable, Sendable {
     }
 }
 
+/// 瀑布流里一项的落位。
+///
+/// 坐标系是**列排布区**的左上角，不是视口、也不是屏幕 —— 排布区与屏幕之间还隔着
+/// 左右留白，把它留在这一层之外，落位就只跟布局本身有关。
+struct WaterfallPlacement: Equatable, Sendable {
+
+    let id: Int
+
+    /// 落在第几列（从 0 起）。
+    let column: Int
+
+    /// 该卡片在列排布区里的矩形。
+    let frame: CGRect
+}
+
 /// 瀑布流的列分配结果。
 struct WaterfallLayout: Equatable, Sendable {
 
@@ -147,6 +162,13 @@ struct WaterfallLayout: Equatable, Sendable {
 
     /// item id → 实际高度。渲染侧按 id 取，避免重算。
     let heights: [Int: CGFloat]
+
+    /// 每项的落位，顺序即 `items` 的传入顺序。
+    ///
+    /// 与 `heights` 有冗余（frame 的高度就是 `heights[id]`），但两者服务的对象不同：
+    /// `heights` 给渲染侧的 `VStack` 定高，`placements` 给命中判定定位。
+    /// 渲染不需要坐标，命中不需要按列分组 —— 硬合成一种是两边都别扭。
+    let placements: [WaterfallPlacement]
 
     /// 最高那列的高度，即瀑布流的内容高度。
     var contentHeight: CGFloat { columnHeights.max() ?? 0 }
@@ -163,6 +185,12 @@ struct WaterfallLayout: Equatable, Sendable {
         var columnHeights = Array(repeating: CGFloat.zero, count: metrics.columns)
         var heights: [Int: CGFloat] = [:]
         heights.reserveCapacity(items.count)
+        var placements: [WaterfallPlacement] = []
+        placements.reserveCapacity(items.count)
+
+        /// 列在排布区里的横向起点。列宽与间距都由 `metrics` 决定，
+        /// 所以这一列一旦定下就不会再变 —— 可以在循环外先算好。
+        let columnStride = metrics.columnWidth + metrics.columnSpacing
 
         for item in items {
             let height = metrics.height(for: item)
@@ -180,9 +208,29 @@ struct WaterfallLayout: Equatable, Sendable {
             }
             columns[target].append(item)
             columnHeights[target] += height
+
+            // 累计高度此刻**已经含**这一项，减掉才是它的顶边。
+            // 顺序不能反：先取顶边再累加，间距那一步就白算了。
+            placements.append(
+                WaterfallPlacement(
+                    id: item.id,
+                    column: target,
+                    frame: CGRect(
+                        x: CGFloat(target) * columnStride,
+                        y: columnHeights[target] - height,
+                        width: metrics.columnWidth,
+                        height: height
+                    )
+                )
+            )
         }
 
-        return WaterfallLayout(columns: columns, columnHeights: columnHeights, heights: heights)
+        return WaterfallLayout(
+            columns: columns,
+            columnHeights: columnHeights,
+            heights: heights,
+            placements: placements
+        )
     }
 }
 

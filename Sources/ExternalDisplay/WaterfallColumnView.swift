@@ -26,6 +26,18 @@ struct WaterfallColumnView: View {
     let layout: WaterfallLayout
     let metrics: WaterfallMetrics
 
+    /// 指针当前落在哪张卡上（`nil` = 指针不在屏上，或没落在任何卡片范围内）。
+    ///
+    /// 由渲染侧每帧现算后传进来，视图自己不做命中判定 —— 那件事需要知道
+    /// hero 高度与滚动位移，属于 `WaterfallFocus` 的职责，这里只负责画。
+    let focusedID: Int?
+
+    /// 已确认选中的那张卡（轻点 / 扳机），`nil` 表示当前没有选中。
+    ///
+    /// 与 `focusedID` 是两个独立的状态：指针移开之后选中仍然留着，
+    /// 它只由"再次确认"改变。
+    let selectedID: Int?
+
     /// 底栏文案。与 `WaterfallItem.captionCount` 一一对应，
     /// 取用时取模兜底，两处数量对不上也不会崩。
     private static let captions = [
@@ -54,6 +66,8 @@ struct WaterfallColumnView: View {
 
     // MARK: - 卡片
 
+    /// 选中态优先于悬浮态：两张卡同时被指针和选中踩中时，画选中那一种。
+    @ViewBuilder
     private func card(_ item: WaterfallItem) -> some View {
         let height = layout.heights[item.id] ?? metrics.unitHeight
         let cornerRadius = metrics.base * 0.018 * item.cornerScale
@@ -61,8 +75,10 @@ struct WaterfallColumnView: View {
             max(height * 0.30, metrics.base * 0.072),
             metrics.base * 0.095
         )
+        let isSelected = item.id == selectedID
+        let isFocused = !isSelected && item.id == focusedID
 
-        return VStack(spacing: 0) {
+        let body = VStack(spacing: 0) {
             cover(item)
             footer(item)
                 .frame(height: footerHeight)
@@ -76,6 +92,37 @@ struct WaterfallColumnView: View {
                     lineWidth: item.isFeatured ? 1.5 : 1
                 )
         }
+
+        // 环与阴影**只画在命中的那一张上**。做成条件分支而不是"给所有卡都挂一层
+        // 透明度为 0 的阴影"：后者在 4K 上等于每张卡都多一个离屏合成图层，
+        // 36 张全静止也要付这笔钱。分支只让 0 ~ 2 张卡额外绘制。
+        if isFocused || isSelected {
+            body
+                .overlay { focusRing(cornerRadius: cornerRadius, isSelected: isSelected) }
+                .modifier(FocusGlow(isSelected: isSelected, base: metrics.base))
+        } else {
+            body
+        }
+    }
+
+    /// 焦点环：画在卡片**外面**，与卡片边缘之间留一道空隙。
+    ///
+    /// 圆角半径跟着 `gap` 一起放大，环与卡片才是同心的一对轮廓；
+    /// 只把矩形撑大而不动圆角，四角会出现肉眼可见的"两只角不平行"。
+    ///
+    /// `.strokeBorder` 而不是 `.stroke`：前者画在形状**内侧**，尺寸就是
+    /// `padding(-gap)` 撑出来的那圈，不会往外再多占一个线宽。
+    private func focusRing(cornerRadius: CGFloat, isSelected: Bool) -> some View {
+        let gap = metrics.base * FocusPalette.gapRatio
+
+        return RoundedRectangle(cornerRadius: cornerRadius + gap, style: .continuous)
+            .strokeBorder(
+                isSelected ? LaserPalette.core : .white.opacity(0.45),
+                lineWidth: metrics.base * (isSelected
+                    ? FocusPalette.selectedLineRatio
+                    : FocusPalette.hoverLineRatio)
+            )
+            .padding(-gap)
     }
 
     /// 封面：主渐变 + 一层同侧高光。
@@ -149,6 +196,47 @@ struct WaterfallColumnView: View {
     }
 }
 
+/// 焦点光晕。
+///
+/// 两态**都是发光**，不是投影 —— 这一层底是 `Color(red: 0.004, ...)` 的近黑，
+/// 黑色投影落在上面完全看不见（第一版就是这么写的，截图上一点痕迹都没有）。
+/// 近黑底上唯一读得出来的"阴影"是外溢的光，所以这里只换颜色与半径：
+/// 悬浮是一圈白，选中是更浓的红再叠一层白把环内侧压实。
+///
+/// 光晕用 `.shadow(radius:y: 0)` 而不是 `.blur`：前者作用在卡片**轮廓**上，
+/// 不会把卡片本身的内容（渐变封面、底栏文字）一起糊掉。
+private struct FocusGlow: ViewModifier {
+
+    let isSelected: Bool
+    let base: CGFloat
+
+    func body(content: Content) -> some View {
+        if isSelected {
+            content
+                .shadow(color: LaserPalette.core.opacity(0.55), radius: base * 0.050, y: 0)
+                .shadow(color: .white.opacity(0.30), radius: base * 0.018, y: 0)
+        } else {
+            content
+                .shadow(color: .white.opacity(0.30), radius: base * 0.030, y: 0)
+        }
+    }
+}
+
+/// 焦点环的几何常量。颜色刻意不放在这里 —— 它们来自 `LaserPalette`，
+/// 与外接屏上的光标共用同一套配色，见 `focusRing`。
+private enum FocusPalette {
+
+    /// 环与卡片之间的空隙。
+    ///
+    /// 取值要压得住卡片自己的白描边（1 ~ 1.5pt）：空隙太窄的话，环和卡片轮廓
+    /// 会糊成一条粗线，看起来像描边画重了，而不是"这一项被聚焦了"。
+    static let gapRatio: CGFloat = 0.012
+
+    /// 环宽。选中比悬浮粗一档 —— 这是"确认过"与"只是扫过"之间最省事的区分。
+    static let hoverLineRatio: CGFloat = 0.006
+    static let selectedLineRatio: CGFloat = 0.010
+}
+
 #Preview {
     GeometryReader { geometry in
         let base = min(geometry.size.width, geometry.size.height)
@@ -159,7 +247,12 @@ struct WaterfallColumnView: View {
             columns: WaterfallMetrics.columnCount(for: geometry.size)
         )
 
-        WaterfallColumnView(layout: .make(items: items, metrics: metrics), metrics: metrics)
+        WaterfallColumnView(
+            layout: .make(items: items, metrics: metrics),
+            metrics: metrics,
+            focusedID: items[3].id,
+            selectedID: items[8].id
+        )
     }
     .background(.black)
     .ignoresSafeArea()

@@ -82,6 +82,25 @@ final class RemoteControl {
     /// 轻点计数。外接屏侧靠它的变化触发一次涟漪反馈。
     private(set) var tapCount: Int = 0
 
+    /// 当前选中的瀑布流项（`nil` = 没有选中）。
+    ///
+    /// ## 这一项是**反向**写入的
+    /// 「指针落在哪张卡上」需要外接屏的几何 —— 视口尺寸、hero 高度、内容的滚动位移，
+    /// 全都在渲染那侧，手机端无从判断。所以命中由外接屏算出来，再把结果写回这里：
+    /// **本类里唯一一条「外接屏 → 模型」的写入**，其余全部由手机端单向驱动。
+    ///
+    /// 之所以不把它留在渲染侧的 `@State`：那样就只能靠手点验证。选中态没法在启动参数里
+    /// 预置，也就进不了逐状态截图对比 —— 而 `simctl` 没有触摸注入 API，
+    /// 这个项目里"能脚本化验证"是硬指标（见 `MockRemoteState`）。
+    private(set) var selectedItemID: Int?
+
+    /// 记录一次选中。传 `nil` 取消选中。
+    func select(item id: Int?) {
+        guard selectedItemID != id else { return }
+        selectedItemID = id
+        lastEvent = id.map { "选中第 \($0) 项" } ?? "取消选中"
+    }
+
     /// 最近一次离散手势的说明，手机端面板上直读。
     private(set) var lastEvent: String = "等待操作"
 
@@ -179,6 +198,7 @@ final class RemoteControl {
         zoom = 1
         pointer = nil
         pointerSource = .touch
+        selectedItemID = nil
         lastEvent = "已复位"
     }
 

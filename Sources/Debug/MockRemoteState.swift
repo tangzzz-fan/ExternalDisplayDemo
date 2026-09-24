@@ -22,7 +22,13 @@ import Foundation
 /// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay \
 ///     -remoteState scroll=0.3,pull=0.25,zoom=1.5
 /// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay -remoteState pointer=0.3:0.35
+/// xcrun simctl launch <device> <bundle-id> -mockExternalDisplay \
+///     -remoteState pointer=0.3:0.4,selected=7
 /// ```
+///
+/// `selected` 写的是 `RemoteControl.selectedItemID`（瀑布流卡片的选中态）。
+/// 它本该由外接屏那侧的命中判定写回，这里直接预置是为了绕开"没有触摸注入 API
+/// 就点不动卡片"这个限制 —— 与 `pointer` 合起来就能截出「hover」与「选中」两态。
 ///
 /// 也支持 `-remoteState pull=0.5` 这种不带 `=` 的写法（与 `-mockExternalDisplayAspect`
 /// 的解析保持一致）。
@@ -53,6 +59,7 @@ enum MockRemoteState {
         var pull: CGFloat?
         var zoom: CGFloat?
         var pointer: CGPoint?
+        var selectedItemID: Int?
     }
 
     /// 解析 `key=value` 列表，逗号分隔。无法识别的键直接忽略 ——
@@ -81,6 +88,8 @@ enum MockRemoteState {
                 if components.count == 2 {
                     state.pointer = CGPoint(x: components[0], y: components[1])
                 }
+            case "selected":
+                state.selectedItemID = Int(value)
             default:
                 continue
             }
@@ -116,6 +125,11 @@ enum MockRemoteState {
         }
         if let pointer = state.pointer {
             remote.movePointer(to: pointer, source: .touch)
+        }
+        // 放在最后：它不依赖上面任何一个量，但排在指针之后读起来
+        // 与"先指过去、再点确认"的实际顺序一致。
+        if let selected = state.selectedItemID {
+            remote.select(item: selected)
         }
     }
 }

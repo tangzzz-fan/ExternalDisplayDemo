@@ -121,6 +121,9 @@ struct ExternalDisplayRootView: View {
             .clipped()
             .onAppear { reportMetrics(geometry.size) }
             .onChange(of: geometry.size) { _, size in reportMetrics(size) }
+            // 挂在 GeometryReader **内部**：选中判定要问 `plan` 当前命中的是哪一张卡，
+            // 而 `plan` 是这一层闭包里的局部值，外层拿不到。
+            .onChange(of: remote.tapCount) { _, _ in toggleSelection(in: plan) }
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
@@ -143,6 +146,7 @@ struct ExternalDisplayRootView: View {
         let layout: WaterfallLayout
         let scroll: ScrollMetrics
         let heroHeight: CGFloat
+        let focus: WaterfallFocus
 
         init(viewport: CGSize) {
             let base = min(viewport.width, viewport.height)
@@ -163,6 +167,20 @@ struct ExternalDisplayRootView: View {
                 viewport: viewport,
                 contentHeight: heroHeight + waterfall.inset + layout.contentHeight,
                 inset: waterfall.inset
+            )
+            // 列排布区左上角在容器里的位置：横向是排布区居中让出的那侧留白，
+            // 纵向是「上内边距 + hero + VStack 间距」——
+            // 与 `contentColumn` 里那个 VStack 的结构一一对应，改一边要改两边。
+            //
+            // 横向刻意用「视口宽 − 排布区宽」而不是 `horizontalInset`：视口窄到
+            // 装不下两侧留白时 `columnFieldWidth` 会被 `max(0, _)` 护栏夹住，
+            // 那时两者不再相等，而排布区**实际**的位置由被夹住的那个值决定。
+            self.focus = WaterfallFocus(
+                fieldOrigin: CGPoint(
+                    x: (viewport.width - waterfall.columnFieldWidth) / 2,
+                    y: waterfall.inset * 2 + heroHeight
+                ),
+                placements: layout.placements
             )
         }
     }
@@ -211,7 +229,12 @@ struct ExternalDisplayRootView: View {
 
         return VStack(alignment: .leading, spacing: plan.waterfall.inset) {
             hero(plan)
-            WaterfallColumnView(layout: plan.layout, metrics: plan.waterfall)
+            WaterfallColumnView(
+                layout: plan.layout,
+                metrics: plan.waterfall,
+                focusedID: focusedItem(in: plan),
+                selectedID: remote.selectedItemID
+            )
         }
         .padding(.vertical, plan.waterfall.inset)
         // 容器宽度**锁死**为视口宽。父级 VStack 拿到的宽度一旦被子视图撑宽，
@@ -505,6 +528,32 @@ struct ExternalDisplayRootView: View {
         }
     }
 
+    // MARK: - 焦点
+
+    /// 指针当前命中的瀑布流卡片。
+    ///
+    /// 纯计算、每次现算：命中结果随指针每帧变化（空鼠 60 Hz），
+    /// 存进 `@State` 只会多出一份要手动同步的副本，而它没有任何跨帧语义。
+    ///
+    /// 指针不在屏上（`pointer == nil`）时直接返回 `nil` —— 触控板与空鼠
+    /// 两条路都靠这个判断"现在没有焦点"，不需要再分模式。
+    private func focusedItem(in plan: DisplayPlan) -> Int? {
+        guard let pointer = remote.pointer else { return nil }
+        return plan.focus.item(
+            at: point(pointer, in: plan),
+            contentOffsetY: plan.scroll.contentOffset(scroll: remote.scroll, pull: remote.pull)
+        )
+    }
+
+    /// 轻点 / 扳机：把当前命中的卡片设为选中，再确认同一张则取消。
+    ///
+    /// 指针没落在任何卡片上时**不动选中** —— 空白处点一下不该把已经选好的东西
+    /// 丢掉；而"取消"已经有"再点同一张"这条明确路径，不必再占一个手势。
+    private func toggleSelection(in plan: DisplayPlan) {
+        guard let focused = focusedItem(in: plan) else { return }
+        remote.select(item: remote.selectedItemID == focused ? nil : focused)
+    }
+
     // MARK: - 几何与文案
 
     private func point(_ normalized: CGPoint, in plan: DisplayPlan) -> CGPoint {
@@ -535,7 +584,10 @@ struct ExternalDisplayRootView: View {
 }
 
 /// 光标配色。触控板沿用原来的橙色，空鼠用红色激光系。
-private enum LaserPalette {
+///
+/// 非 private：瀑布流的焦点环也取这里的颜色 —— 整块屏上"红色 = 交互焦点"
+/// 是同一套语言，两处各写一遍迟早会漂开。
+enum LaserPalette {
     static let core = Color(red: 1.0, green: 0.21, blue: 0.25)
     static let glow = Color(red: 1.0, green: 0.45, blue: 0.28)
     static let touch = Color.orange
