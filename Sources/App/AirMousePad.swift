@@ -6,6 +6,13 @@ import SwiftUI
 /// 预热与可用时间的完整读数在 `AirMouseDiagnostics`（表单里），
 /// 这里只留一行摘要 —— 遥控台是操作面，不是仪表盘。
 ///
+/// ## 为什么这里也要一块手势面
+/// 空鼠的交互是「抬手瞄准 + 确认」，而确认原本只有一个「扳机」按钮。
+/// 但空鼠工作时手机是被**举起来**的，手指去够底部那个按钮既别扭、又会带歪姿态 ——
+/// 瞄准的那只手没法稳定地去点一个具体控件。
+/// 所以确认必须能落在手边的任意位置：整块面板都是轻点目标（`GesturePad`）。
+/// 顺带把"上下拖动滚动"也放进来，这样空鼠跑着的时候不必切回触控板那一栏。
+///
 /// ## 为什么归零是一个常规按钮
 /// 陀螺仪积分出的 yaw 会漂移，而且 `ZVertical` 参考系的水平零点**本来就是任意的**，
 /// 所以"当前指向 = 屏幕中心"这件事必须能随时重新声明。
@@ -19,6 +26,7 @@ struct AirMousePad: View {
         VStack(spacing: 14) {
             statusRow
             actionRow
+            gesturePad
             sensitivityRow
             frameRow
         }
@@ -76,7 +84,7 @@ struct AirMousePad: View {
             let count = airMouse.warmup.stream.sampleCount
             return "已收 \(count) 个样本 · \(airMouse.warmup.frame.title)"
         }
-        return "抬手转动手机移动激光，扳机确认"
+        return "抬手转动手机移动激光，轻点面板或扳机确认"
     }
 
     // MARK: - 操作
@@ -102,6 +110,38 @@ struct AirMousePad: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .disabled(!airMouse.isRunning)
+        }
+    }
+
+    // MARK: - 手势面
+
+    /// 空鼠开着时的单指手势面。
+    ///
+    /// 落点**不**映射光标：这一栏的光标归陀螺仪管，手指再插一脚会让激光乱跳。
+    /// 所以这块面板只做两件事 —— 轻点确认、上下拖动滚动。
+    private var gesturePad: some View {
+        GesturePad(
+            hints: [
+                GesturePadHint(text: "轻点面板 → 点击确认（等同扳机）"),
+                GesturePadHint(text: "单指上下拖动 → 滚动外接屏"),
+                GesturePadHint(text: "抬手转动手机 → 移动激光", isSecondary: true)
+            ],
+            height: 120,
+            mapsPointer: false,
+            onTap: { confirm() }
+        )
+    }
+
+    /// 轻点确认。
+    ///
+    /// 空鼠开着时走 `trigger()` —— 它会计一次扳机次数，手机端的读数栏与诊断页都能看到，
+    /// 与按「扳机」按钮是同一条路径。没开时退化成一次普通轻点，
+    /// 免得这块面板在空鼠没启动时变成哑巴。
+    private func confirm() {
+        if airMouse.isRunning {
+            airMouse.trigger()
+        } else {
+            remote.tap()
         }
     }
 

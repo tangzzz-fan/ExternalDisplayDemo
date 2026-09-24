@@ -182,11 +182,15 @@ ExternaldisplayDemo/
 ├── docs/
 │   ├── mock-external-display.md                   -mockExternalDisplay 的原理（可发布）
 │   └── devnotes/                                  分支级实验记录
+│       ├── 2026-09-22-swiftui-scene-accessory.md  scene accessory 改造
+│       ├── 2026-09-24-waterfall-starfield.md      瀑布流 + 下拉露背景墙 + 星海假 3D
+│       └── 2026-09-24-airmouse-gesture.md         空鼠手势：上下滑动 + 单指点击确认
 └── Sources/
     ├── App/
     │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）+ accessory 声明
     │   ├── PhoneRootView.swift                    状态面板 + 推送内容控制
-    │   ├── RemoteControlPad.swift                 手机端遥控板（手势采集）
+    │   ├── GesturePad.swift                       ★ 单指手势采集面（触控板与空鼠栏共用）
+    │   ├── RemoteControlPad.swift                 手机端遥控板（触控板那一栏）
     │   ├── RemoteControlDock.swift                底部常驻遥控台（safeAreaInset 宿主）
     │   ├── AirMousePad.swift                      空鼠模式的控制面板
     │   └── AirMouseDiagnostics.swift              陀螺仪预热/可用性读数
@@ -194,6 +198,7 @@ ExternaldisplayDemo/
     │   ├── ExternalDisplayMonitor.swift           连接状态记录（@Observable，三个数据源）
     │   ├── DisplayContentStore.swift              共享内容状态（「选什么」）
     │   ├── RemoteControl.swift                    共享交互状态（「怎么看」）
+    │   ├── PadGesture.swift                       ★ 单指手势状态机（纯逻辑，可独立断言）
     │   ├── AirMouse.swift                         手机姿态 → 激光指针
     │   └── MotionWarmup.swift                     CoreMotion 预热与可用性判定
     ├── ExternalDisplay/
@@ -243,18 +248,50 @@ ExternaldisplayDemo/
 
 ```
    手机端手势                   共享状态                    外接屏渲染
-RemoteControlPad   ──写──▶   RemoteControl    ──读──▶  ExternalDisplayRootView
-  DragGesture                 scroll / zoom             .offset(y:)
-  MagnifyGesture              pointer / tapCount        .scaleEffect()
+GesturePad         ──写──▶   RemoteControl    ──读──▶  ExternalDisplayRootView
+  DragGesture                 scroll / pull            .offset(y:)
+  MagnifyGesture              pointer / tapCount       .scaleEffect()
+  CoreMotion                  pointerSource            laser cursor
 ```
 
 | 手势 | 手机端采集 | 外接屏响应 |
 | --- | --- | --- |
 | 单指拖动 | `DragGesture`，逐帧增量归一化 | 内容列按 `scroll` 偏移；手指落点画成橙色光标环 |
 | 单指继续下拉 | 同一个 `DragGesture`，越过顶部后自动转成 `pull` | 内容整体下移，露出星海背景墙（见第九节） |
+| 单指轻点 | 同一个 `DragGesture`，位移未越过阈值 | 光标处扩散一次涟漪（点击确认） |
 | 双指捏合 | `MagnifyGesture` | hero 图案画布 `.scaleEffect(zoom)` |
-| 轻点 | 按钮 | 光标处扩散一次涟漪 |
 | 转动手机 | `CoreMotion`（`AirMouse`） | 红色激光指针 + 拖尾；同时驱动星海视差 |
+| 轻点空鼠栏面板 | 同一块 `GesturePad` | 同上，等同按下「扳机」 |
+
+### 两块采集面，一份逻辑
+
+触控板（`RemoteControlPad`）与空鼠栏（`AirMousePad`）各有一块 `GesturePad`，
+差别只有三个参数：提示文案、高度、以及**落点要不要映射成光标**。
+
+空鼠栏为什么要那块面：空鼠的交互是「抬手瞄准 + 确认」，而确认原本只有一个「扳机」按钮。
+但空鼠工作时手机是被**举起来**的，手指去够底部那个按钮既别扭、又会带歪姿态 ——
+瞄准的那只手没法稳定地去点一个具体控件。所以确认必须能落在手边的任意位置。
+
+### 一个手势识别器同时管滚动和轻点
+
+```
+按下 ──┬─ 位移没越过 slop（8pt）就抬起 ──▶ 轻点：点击确认
+       └─ 位移越过 slop ──────────────▶ 拖动：开始滚动
+```
+
+判定逻辑全在 `PadGesture`（`Sources/Core/`）这个**纯状态机**里，视图只负责转发。
+两个容易写错的点：
+
+- **slop 内的位移必须被吃掉，不能补发**。不补发是"起手不跳"的前提；
+  若反过来先滚动、抬起时再补一次点击，那么每次轻点都会顺带把画面推走几个点。
+- **逐帧增量必须用累计位移之差**。`DragGesture.translation` 是累计值，
+  直接拿它当增量，滚动速度会随拖拽时长线性放大。
+
+还有一条防误触：轻点要求按下时长 ≤ 0.4s。空鼠瞄准时手指自然搭在面板上很常见，
+抬手时误触发一次点击比漏掉一次更让人恼火。
+
+完整推导、四个易错点与 27 条断言清单见
+[`docs/devnotes/2026-09-24-airmouse-gesture.md`](docs/devnotes/2026-09-24-airmouse-gesture.md)。
 
 三个实现要点：
 
@@ -269,9 +306,13 @@ RemoteControlPad   ──写──▶   RemoteControl    ──读──▶  Ext
   必须写 `alignment: .topLeading`，再靠 `.clipped()` 裁掉溢出。
 
 > **验证边界**：`xcrun simctl` 没有触摸注入 API，Xcode 27 的模拟器 GUI（DeviceHub）也没有
-> 可脚本化的设备窗口，所以「手势 → 状态」这半条链路在本机无法自动化验证，需手动在模拟器里拖一下。
-> 「状态 → 渲染」这半条已用临时插桩验证过（`scroll = 0.62` / `zoom = 1.9` / `pointer = (0.3, 0.35)`）：
-> 可见内容恰为条目 04（顶部被切）～11，光标环实测落点 `(109.5, 70.8)pt`，与计算值 `(108.6, 71.0)pt` 一致。
+> 可脚本化的设备窗口，所以「手指按下 → 产生什么动作」这条链路**曾经**完全无法自动化验证。
+> 后来把手势判定抽成纯状态机 `PadGesture`（见上），这半条链路就可以喂事件断言了 ——
+> 目前覆盖 slop 边界、轻点判定、逐帧增量、方向、开关与取消，共 27 条。
+> 仍然只能手点的是「手势能不能被识别到」这一层（SwiftUI 的手势分发本身）。
+> 「状态 → 渲染」那半条已用 `-remoteState` 预置参数逐状态截图验证过
+> （`scroll = 0.62` / `zoom = 1.9` / `pointer = (0.3, 0.35)`）：可见内容恰为条目 04（顶部被切）～11，
+> 光标环实测落点 `(109.5, 70.8)pt`，与计算值 `(108.6, 71.0)pt` 一致。
 >
 > **手势归属靠结构保证，不靠运气**。触控板最初放在 `Form` 里，它的 `DragGesture` 会与外层
 > 滚动视图的竖向 pan 手势竞争 —— 而 SwiftUI **没有**能压过祖先 `ScrollView` 的公开 API
@@ -279,6 +320,7 @@ RemoteControlPad   ──写──▶   RemoteControl    ──读──▶  Ext
 > `.safeAreaInset(edge: .bottom)` 挂在滚动区域**之外**，归属没有歧义，
 > 顺带省掉了「要先滚动才能摸到遥控板」这一步。遥控台默认收起只留读数栏，
 > 展开才铺开触控板 —— 这样它和模拟外接屏窗口能同时看见。
+> 遥控台自身高度会实时上报给替身窗口，让它始终避开（见第六节第 12 条）。
 
 ---
 
@@ -342,6 +384,9 @@ open ExternalDisplayDemo.xcodeproj
     （`.safeAreaInset`），或换成承载 `UIPanGestureRecognizer` 的 `UIViewRepresentable`。
 12. **让浮层窗口与底部常驻 UI 抢位置** → 替身窗口在 `.normal + 1` 层永远盖住主窗口，
     必须主动为底部面板预留空间（见第五节），否则展开时会遮住面板标题栏。
+    **预留量必须实测，不能写死**：遥控台收起约 50pt、展开后三四百点，各栏还不一样高。
+    写死的 96 在空鼠栏加上手势面之后就不够了 —— 表现是「触控板 / 空鼠」切换器被窗口盖住。
+    现在由 `RemoteControlDock` 用 `GeometryReader` 实测上报，高度一变就重新摆位。
 13. ~~**SwiftUI `App` 生命周期下，把 `UIWindowSceneSessionRoleApplication` 从
     `UISceneConfigurations` 里删掉** → app scene 连不上，**纯黑屏、零日志**。~~
     **这条已实测推翻**（见第八节）：`UISceneConfigurations` 整块在 SwiftUI 生命周期下都不是必需的，
@@ -380,6 +425,15 @@ open ExternalDisplayDemo.xcodeproj
 23. **改动后截图"看起来没变化"时，先排除"构建没生效"** → 比对模拟器容器内二进制与
     构建产物的 md5，比看截图猜可靠得多。这次正是靠它确认了修正确实部署了，
     那张卡本来就不需要修正 —— 是缩略图上看错了颜色。
+24. **把有分支的判定逻辑留在视图里** → 它就成了**永久验证盲区**。手势的
+    「slop 边界 / 轻点 vs 拖动 / 逐帧增量」全是纯逻辑，但写在 `View` 里就带上了
+    SwiftUI 依赖，脱离模拟器一行都断言不了。抽成 `PadGesture` 之后，
+    同一段逻辑立刻可以喂事件断言（本次新增 27 条）。
+    **判据很简单：这段逻辑有没有 `if`？有的话就该问一句"它能不能被断言"。**
+25. **给手势加新功能时顺手改了视图结构，却没重新核对跨视图的几何假设** →
+    空鼠栏加了一块手势面 → 遥控台变高 → 替身窗口按老的固定预留量摆位 →
+    「触控板 / 空鼠」切换器被盖住。改动本身没问题，是**别人的常数**失效了。
+    所以：凡是"某个视图的高度/宽度被别人当作常数依赖"的地方，都应该改成实测上报。
 
 ---
 
@@ -647,7 +701,8 @@ let sizeScale     = pow(focal / depth, 0.60)   // 0.76...1.79
 
 三个纯计算文件（`WaterfallLayout` / `DisplayScrollGeometry` / `StarfieldModel`）
 **只依赖 `CoreGraphics` 与 `Foundation`**，因此可以用 `swiftc` 独立编译跑断言 ——
-目前 **135 条全过**。这是刻意设计的：`simctl` 没有触摸注入 API，
+目前 **162 条全过**（另加 `PadGesture`，见第四节）。
+这是刻意设计的：`simctl` 没有触摸注入 API，
 「手势 → 状态」那半条链路只能手点，但「状态 → 布局/投影」这半条可以真正断言，
 而它恰好是最容易算错的部分。
 

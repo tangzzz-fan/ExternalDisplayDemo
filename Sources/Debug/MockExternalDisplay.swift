@@ -38,7 +38,27 @@ final class MockExternalDisplay {
     @ObservationIgnored private weak var windowScene: UIWindowScene?
     @ObservationIgnored private var window: UIWindow?
 
+    /// 替身窗口假装的屏幕缩放比（模拟一块 3x 的外接屏）。
+    private static let scale: CGFloat = 3
+
+    /// 底部常驻遥控台**实际**占用的高度（点）。
+    ///
+    /// 由 `RemoteControlDock` 自己上报，而不是写死一个常数。
+    /// 遥控台收起时只有一条读数栏（约 50pt），展开后是三四百点，
+    /// 而且**空鼠栏比触控板栏还高**（多一块手势面）—— 任何写死的值都必然过时：
+    /// 这个数曾经是 96，空鼠栏加上手势面之后「触控板 / 空鼠」切换器就被窗口盖住了。
+    @ObservationIgnored private(set) var dockHeight: CGFloat = 96
+
     private init() {}
+
+    /// 遥控台上报自身高度。高度变化会重新摆放替身窗口。
+    ///
+    /// 高度在**点**上，与 `windowScene.coordinateSpace.bounds` 同一坐标系，可以直接比。
+    func reserveBottom(_ height: CGFloat) {
+        guard height > 0, abs(height - dockHeight) > 0.5 else { return }
+        dockHeight = height
+        layout()
+    }
 
     // MARK: - Lifecycle
 
@@ -77,13 +97,7 @@ final class MockExternalDisplay {
         let container = windowScene.coordinateSpace.bounds
         guard container.width > 0, container.height > 0 else { return }
 
-        // 模拟一块 3x 的外接屏，像素尺寸由 letterbox 尺寸推出来
-        let scale: CGFloat = 3
-        let aspect = Self.parseAspect() ?? 16.0 / 9.0
-        let rect = Self.letterboxedRect(in: container.insetBy(dx: 20, dy: 60), aspect: aspect)
-
         let mockWindow = PassthroughWindow(windowScene: windowScene)
-        mockWindow.frame = rect
         mockWindow.windowLevel = .normal + 1
         mockWindow.backgroundColor = .black
         mockWindow.layer.cornerRadius = 20
@@ -94,9 +108,29 @@ final class MockExternalDisplay {
         mockWindow.isHidden = false
         window = mockWindow
 
+        layout()
+    }
+
+    /// 按当前视口与遥控台高度重新摆放替身窗口，并同步上报给监视器。
+    ///
+    /// 抽成独立方法是因为它有两个触发源：窗口刚装好时，以及遥控台高度变化时。
+    private func layout() {
+        guard let window, let windowScene else { return }
+
+        let container = windowScene.coordinateSpace.bounds
+        guard container.width > 0, container.height > 0 else { return }
+
+        let aspect = Self.parseAspect() ?? 16.0 / 9.0
+        let rect = Self.letterboxedRect(
+            in: container.insetBy(dx: 20, dy: 60),
+            aspect: aspect,
+            reservedBottom: dockHeight
+        )
+        window.frame = rect
+
         ExternalDisplayMonitor.shared.attachMock(
-            pixelSize: CGSize(width: rect.width * scale, height: rect.height * scale),
-            nativeScale: scale
+            pixelSize: CGSize(width: rect.width * Self.scale, height: rect.height * Self.scale),
+            nativeScale: Self.scale
         )
     }
 
@@ -113,10 +147,20 @@ final class MockExternalDisplay {
     /// 底部预留 `reservedBottom`：手机屏底部常驻着遥控台（`RemoteControlDock`），
     /// 而替身窗口浮在 `.normal + 1` 层、永远盖在主窗口之上，不主动避开的话
     /// 展开遥控台时两者会在屏幕中段互相遮挡。
-    private static func letterboxedRect(in container: CGRect, aspect: CGFloat) -> CGRect {
+    ///
+    /// **高度由调用方传进来**（= 遥控台上报的实际高度），不再写死常数 ——
+    /// 写死过一次 96，空鼠栏加上手势面之后就被盖住了。
+    ///
+    /// 注意窗口是**宽度受限**的：16:9 在 362pt 宽的可视区里只有 204pt 高，
+    /// 远小于可用的竖向空间。所以预留量只影响窗口的**纵向位置**，不影响尺寸 ——
+    /// 遥控台变高时窗口整体上移，下方留出的空白是"不遮挡"的必然代价。
+    private static func letterboxedRect(
+        in container: CGRect,
+        aspect: CGFloat,
+        reservedBottom: CGFloat
+    ) -> CGRect {
         guard container.width > 0, container.height > 0, aspect > 0 else { return container }
 
-        let reservedBottom: CGFloat = 96
         let available = CGRect(
             x: container.minX,
             y: container.minY,

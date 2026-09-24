@@ -8,13 +8,14 @@ import SwiftUI
 /// `PassthroughWindow.hitTest` 恒返回 `nil`）。所以「在外接屏上滑动」只能在
 /// 这里采集，再经 `RemoteControl` 单向送到外接屏的渲染视图。
 ///
-/// 采集到的手势：
+/// 采集到的手势（全部由 `GesturePad` 承担，本类只负责接线）：
 /// - 单指拖动 → 滚动，手指落点同时映射为外接屏上的光标
+/// - 单指轻点 → 点击确认
 /// - 双指捏合 → 缩放（模拟器需按住 Option 拖拽）
 ///
 /// 另配绝对定位控件（滑杆 / 按钮）作为兜底：模拟器里捏合手势不好操作，
 /// 且真机上也常有"精确调到某个值"的需求。
-/// **不要把它放进 `Form` / `ScrollView`**：触控板的 `DragGesture` 会与外层滚动视图的
+/// **不要把它放进 `Form` / `ScrollView`**：采集面的 `DragGesture` 会与外层滚动视图的
 /// 竖向 pan 手势竞争，而 SwiftUI 没有能压过祖先 ScrollView 的公开 API
 /// （`highPriorityGesture` 只影响当前视图与其子视图）。
 /// 统一由 `RemoteControlDock` 经 `.safeAreaInset` 挂在滚动区域之外。
@@ -22,13 +23,10 @@ struct RemoteControlPad: View {
 
     private let remote = RemoteControl.shared
 
-    @State private var isDragging = false
-    /// 上一次的累计位移，用来算逐帧增量。`DragGesture` 给的是累计值，
-    /// 直接拿它当增量会让滚动速度随拖拽时长不断放大。
-    @State private var lastTranslation: CGSize = .zero
-    /// 同上，`MagnifyGesture` 给的也是累计倍率。
-    @State private var lastMagnification: CGFloat = 1
+    /// 捏合进行中。
     @State private var isMagnifying = false
+    /// `MagnifyGesture` 给的也是累计倍率，需要缓存上一次的值算增量。
+    @State private var lastMagnification: CGFloat = 1
 
     var body: some View {
         VStack(spacing: 14) {
@@ -43,103 +41,22 @@ struct RemoteControlPad: View {
     // MARK: - 触控板
 
     private var trackpad: some View {
-        GeometryReader { geometry in
-            let size = geometry.size
-            ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.secondary.opacity(0.12))
-
-                if !isDragging && !isMagnifying {
-                    VStack(spacing: 4) {
-                        Text("单指拖动 → 滚动外接屏")
-                        Text("顶部继续下拉 → 露出星海背景墙")
-                        Text("双指捏合 → 缩放（模拟器按住 Option）")
-                            .foregroundStyle(.tertiary)
-                    }
-                    .font(.footnote)
-                    .multilineTextAlignment(.center)
-                    .frame(width: size.width, height: size.height)
-                }
-
-                scrollIndicator(size: size)
-
-                // 手指落点 = 外接屏上的光标
-                if let pointer = remote.pointer {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 20, height: 20)
-                        .position(x: pointer.x * size.width, y: pointer.y * size.height)
-                        .allowsHitTesting(false)
-                }
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .gesture(dragGesture(size: size))
-            .simultaneousGesture(magnifyGesture)
-        }
-        .frame(height: 168)
-    }
-
-    /// 右侧的滚动位置指示条，和外接屏上的进度一一对应。
-    ///
-    /// 下拉时额外从顶端往**下**画一段青色条：它的长度就是背景墙露出的高度，
-    /// 与橙色滚动块方向相反。两者同框，手指往哪边拽、画面发生什么，一眼能对上。
-    private func scrollIndicator(size: CGSize) -> some View {
-        let trackWidth: CGFloat = 4
-        let knobHeight: CGFloat = 30
-        let travel = max(0, size.height - knobHeight - 16)
-        let x = size.width - trackWidth - 10
-        let maxPullLength = size.height * 0.5
-
-        return ZStack(alignment: .topLeading) {
-            if remote.pull > 0 {
-                Capsule()
-                    .fill(Color.cyan.opacity(0.85))
-                    .frame(width: trackWidth, height: max(6, maxPullLength * remote.pull))
-                    .offset(x: x, y: 8)
-            }
-
-            Capsule()
-                .fill(Color.orange.opacity(0.75))
-                .frame(width: trackWidth, height: knobHeight)
-                .offset(x: x, y: 8 + travel * remote.scroll)
-        }
-        .frame(width: size.width, height: size.height, alignment: .topLeading)
-        .allowsHitTesting(false)
+        GesturePad(
+            hints: [
+                GesturePadHint(text: "单指拖动 → 滚动外接屏"),
+                GesturePadHint(text: "顶部继续下拉 → 露出星海背景墙"),
+                GesturePadHint(text: "轻点 → 点击确认"),
+                GesturePadHint(text: "双指捏合 → 缩放（模拟器按住 Option）", isSecondary: true)
+            ],
+            // 捏合中禁掉滚动，否则一次捏合会顺带把画面滑走
+            isScrollEnabled: !isMagnifying,
+            isBusy: isMagnifying,
+            onTap: { remote.tap() }
+        )
+        .simultaneousGesture(magnifyGesture)
     }
 
     // MARK: - 手势
-
-    private func dragGesture(size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                guard size.width > 0, size.height > 0 else { return }
-                isDragging = true
-
-                remote.movePointer(
-                    to: CGPoint(
-                        x: value.location.x / size.width,
-                        y: value.location.y / size.height
-                    )
-                )
-
-                // 捏合进行中就不滚动，否则一次捏合会顺带把画面滑走。
-                guard !isMagnifying else {
-                    lastTranslation = value.translation
-                    return
-                }
-
-                let delta = CGSize(
-                    width: value.translation.width - lastTranslation.width,
-                    height: value.translation.height - lastTranslation.height
-                )
-                lastTranslation = value.translation
-                remote.scroll(by: delta.height / size.height)
-            }
-            .onEnded { _ in
-                lastTranslation = .zero
-                isDragging = false
-            }
-    }
 
     private var magnifyGesture: some Gesture {
         MagnifyGesture(minimumScaleDelta: 0.01)

@@ -53,6 +53,37 @@ struct RemoteControlDock: View {
             }
         }
         .background(.bar)
+        .background { heightReporter }
+        // `-dockState=expanded,airMouse`：把"展开 + 切到空鼠栏"这两下点击
+        // 变成启动参数，好让空鼠栏也进入逐状态截图流程（`MockDockState` 里有说明）。
+        .onAppear { applyMockState() }
+    }
+
+    /// 把自身高度上报给模拟外接屏替身窗口。
+    ///
+    /// 遥控台的高度随「收起 / 展开 / 当前在哪一栏」大幅变化（约 50 ~ 430pt），
+    /// 而替身窗口浮在主窗口**之上**，会盖住遥控台顶部的控件 ——
+    /// 空鼠栏比触控板栏多一块手势面，加完之后「触控板 / 空鼠」切换器就被盖住了。
+    /// 所以预留量不能写死，得由这里实测上报。见 `MockExternalDisplay.reserveBottom`。
+    private var heightReporter: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .onAppear { report(height: proxy.size.height) }
+                .onChange(of: proxy.size.height) { _, height in report(height: height) }
+        }
+    }
+
+    private func report(height: CGFloat) {
+        guard MockExternalDisplay.isEnabled else { return }
+        MockExternalDisplay.shared.reserveBottom(height)
+    }
+
+    private func applyMockState() {
+        guard let state = MockDockState.current else { return }
+        if state.isExpanded { isExpanded = true }
+        if let raw = state.modeRaw, let preset = ControlMode(rawValue: raw) {
+            mode = preset
+        }
     }
 
     // MARK: - 读数栏（同时是展开/收起按钮）
