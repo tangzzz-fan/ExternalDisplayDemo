@@ -119,6 +119,9 @@ struct AirMousePad: View {
     ///
     /// 落点**不**映射光标：这一栏的光标归陀螺仪管，手指再插一脚会让激光乱跳。
     /// 所以这块面板只做两件事 —— 轻点确认、上下拖动滚动。
+    ///
+    /// 滚动认**单指**（`.oneFinger`），与触摸板相反：手机举在手上的时候，
+    /// 腾出第二根手指去滑面板既别扭又会带歪姿态，单指是这里唯一顺手的做法。
     private var gesturePad: some View {
         GesturePad(
             hints: [
@@ -128,6 +131,7 @@ struct AirMousePad: View {
             ],
             height: 120,
             mapsPointer: false,
+            scrollGesture: .oneFinger,
             onTap: { confirm() }
         )
     }

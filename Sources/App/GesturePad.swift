@@ -11,25 +11,32 @@ struct GesturePadHint {
     var isSecondary = false
 }
 
-/// 一块**单指手势采集面** —— 手机端所有「手势 → 外接屏」的输入都从这里进。
+/// 一块**手势采集面** —— 手机端所有「手势 → 外接屏」的输入都从这里进。
 ///
-/// 两个宿主做的事完全一样：
-/// - 触控板（`RemoteControlPad`）：主控面，手指落点同时当作外接屏上的光标；
-/// - 空鼠栏（`AirMousePad`）：空鼠开着时的补充面，落点**不**映射光标。
+/// 两个宿主做的事几乎一样，只差在"多少根手指算滚动"：
+/// - 触控板（`RemoteControlPad`）：主控面，手指落点同时当作外接屏上的光标，
+///   单指只移光标、**双指**才滚画面（`.twoFinger`）；
+/// - 空鼠栏（`AirMousePad`）：空鼠开着时的补充面，落点**不**映射光标，
+///   单指就能滚（`.oneFinger`）。
 ///
-/// 做成一个视图而不是复制两份，是为了让两处的手感**必然**一致：
+/// 做成一个视图而不是复制两份，是为了让两处的判定逻辑**必然**一致：
 /// 复制的话，迟早有一处被改了阻尼或分母而另一处没跟上。
 ///
-/// ## 一个手势识别器同时管两件事
+/// ## 触摸从哪来
+/// 由 `TouchSurface`（UIKit）采集，再交给 `PadGesture` 这个纯状态机。
+/// 换掉 SwiftUI 的 `DragGesture` 是因为它**读不到手指数量**，
+/// 而"单指移光标 / 双指滚画面"唯一的分辨依据就是它。详见 `TouchSurface`。
+///
+/// ## 一个状态机同时管两件事
 ///
 /// ```
 /// 按下 ──┬─ 位移没越过 slop 就抬起 ──▶ 轻点：点击确认
 ///        └─ 位移越过 slop ──────────▶ 拖动：开始滚动
 /// ```
 ///
-/// 两者共用一个 `DragGesture`，靠**位移阈值**（`slop`）区分。
-/// 判定逻辑全部在 `PadGesture` 这个纯状态机里 —— 本视图只负责
-/// 「把手势事件转发进去、把动作转发给 `RemoteControl`」。
+/// 两者共用一个状态机，靠**位移阈值**（`slop`）区分。
+/// 判定逻辑全部在 `PadGesture` 里 —— 本视图只负责
+/// 「把触摸转发进去、把动作转发给 `RemoteControl`」。
 /// 抽出去的理由见 `PadGesture` 的类型文档：`simctl` 没有触摸注入 API，
 /// 留在视图里的话这段逻辑就完全无法自动验证。
 ///
@@ -55,6 +62,9 @@ struct GesturePad: View {
     /// 触控板要（它就是靠落点控制光标的），空鼠不要 ——
     /// 那一栏的光标归陀螺仪管，手指再插一脚会让激光乱跳。
     var mapsPointer: Bool = true
+
+    /// 多少根手指算滚动。触控板给 `.twoFinger`，空鼠栏给 `.oneFinger`。
+    var scrollGesture: PadGesture.ScrollGesture = .oneFinger
 
     /// 是否允许滚动。触控板上捏合进行中由调用方置 `false`，
     /// 否则一次捏合会顺带把画面滑走。
@@ -91,9 +101,14 @@ struct GesturePad: View {
                         .position(x: pointer.x * size.width, y: pointer.y * size.height)
                         .allowsHitTesting(false)
                 }
+
+                // 放在最上层：触摸归它，下面那些只负责显示。
+                // 透明的 UIKit 视图照样能命中 —— 命中判定不看 `backgroundColor`。
+                TouchSurface { event in
+                    handle(event, size: size)
+                }
+                .frame(width: size.width, height: size.height)
             }
-            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .gesture(dragGesture(size: size))
         }
         .frame(height: height)
     }
@@ -110,23 +125,26 @@ struct GesturePad: View {
         .frame(width: size.width, height: size.height)
     }
 
-    // MARK: - 手势
+    // MARK: - 触摸
 
-    private func dragGesture(size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                perform(gesture.moved(
-                    translation: value.translation,
-                    location: value.location,
-                    time: value.time,
-                    padSize: size,
-                    mapsPointer: mapsPointer,
-                    isScrollEnabled: isScrollEnabled
-                ))
-            }
-            .onEnded { value in
-                perform(gesture.ended(time: value.time))
-            }
+    private func handle(_ event: TouchSurfaceEvent, size: CGSize) {
+        switch event {
+        case .sample(let sampling):
+            perform(gesture.touched(
+                sampling.points,
+                time: sampling.time,
+                padSize: size,
+                mapsPointer: mapsPointer,
+                scrollGesture: scrollGesture,
+                isScrollEnabled: isScrollEnabled
+            ))
+
+        case .ended(let time):
+            perform(gesture.ended(time: time))
+
+        case .cancelled:
+            gesture.cancelled()
+        }
     }
 
     /// 把状态机吐出的动作转发给共享状态。
@@ -183,11 +201,15 @@ struct RemoteScrollIndicator: View {
 
 #Preview {
     VStack(spacing: 16) {
-        GesturePad(hints: [
-            GesturePadHint(text: "单指拖动 → 滚动外接屏"),
-            GesturePadHint(text: "轻点 → 点击确认"),
-            GesturePadHint(text: "双指捏合 → 缩放（模拟器按住 Option）", isSecondary: true)
-        ])
+        GesturePad(
+            hints: [
+                GesturePadHint(text: "单指移动 → 移动光标"),
+                GesturePadHint(text: "双指滑动 → 滚动外接屏"),
+                GesturePadHint(text: "轻点 → 点击确认"),
+                GesturePadHint(text: "双指捏合 → 缩放（模拟器按住 Option）", isSecondary: true)
+            ],
+            scrollGesture: .twoFinger
+        )
         GesturePad(
             hints: [
                 GesturePadHint(text: "轻点面板 → 点击确认（等同扳机）"),
@@ -195,7 +217,8 @@ struct RemoteScrollIndicator: View {
                 GesturePadHint(text: "抬手转动手机 → 移动激光", isSecondary: true)
             ],
             height: 120,
-            mapsPointer: false
+            mapsPointer: false,
+            scrollGesture: .oneFinger
         )
     }
     .padding()

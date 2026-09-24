@@ -181,15 +181,19 @@ ExternaldisplayDemo/
 ├── Support/Info.plist                             scene manifest 在这里
 ├── docs/
 │   ├── mock-external-display.md                   -mockExternalDisplay 的原理（可发布）
+│   ├── scroll-feel.md                             上下滑动为什么跟手（体感角度）
 │   └── devnotes/                                  分支级实验记录
 │       ├── 2026-09-22-swiftui-scene-accessory.md  scene accessory 改造
+│       ├── 2026-09-24-airmouse-gesture.md         空鼠手势：上下滑动 + 单指点击确认
 │       ├── 2026-09-24-waterfall-starfield.md      瀑布流 + 下拉露背景墙 + 星海假 3D
-│       └── 2026-09-24-airmouse-gesture.md         空鼠手势：上下滑动 + 单指点击确认
+│       ├── 2026-09-24-waterfall-inset-focus.md    瀑布流左右边距 + item 焦点环
+│       └── 2026-09-24-trackpad-two-finger.md      触摸板双指滚动（UIKit 触摸层）
 └── Sources/
     ├── App/
     │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）+ accessory 声明
     │   ├── PhoneRootView.swift                    状态面板 + 推送内容控制
-    │   ├── GesturePad.swift                       ★ 单指手势采集面（触控板与空鼠栏共用）
+    │   ├── GesturePad.swift                       ★ 手势采集面（触控板与空鼠栏共用）
+    │   ├── TouchSurface.swift                     ★ UIKit 触摸层（唯一能读到手指数量的地方）
     │   ├── RemoteControlPad.swift                 手机端遥控板（触控板那一栏）
     │   ├── RemoteControlDock.swift                底部常驻遥控台（safeAreaInset 宿主）
     │   ├── AirMousePad.swift                      空鼠模式的控制面板
@@ -198,7 +202,7 @@ ExternaldisplayDemo/
     │   ├── ExternalDisplayMonitor.swift           连接状态记录（@Observable，三个数据源）
     │   ├── DisplayContentStore.swift              共享内容状态（「选什么」）
     │   ├── RemoteControl.swift                    共享交互状态（「怎么看」）
-    │   ├── PadGesture.swift                       ★ 单指手势状态机（纯逻辑，可独立断言）
+    │   ├── PadGesture.swift                       ★ 手势状态机 + 滚动策略（纯逻辑，可独立断言）
     │   ├── AirMouse.swift                         手机姿态 → 激光指针
     │   └── MotionWarmup.swift                     CoreMotion 预热与可用性判定
     ├── ExternalDisplay/
@@ -207,6 +211,7 @@ ExternaldisplayDemo/
     │   ├── ExternalDisplayRootView.swift          外接屏根视图（纯输出，无手势，自测量分辨率）
     │   ├── DisplayPatternCanvas.swift             逐帧渲染验证
     │   ├── WaterfallLayout.swift                  瀑布流布局 + 左右边距几何（纯计算，可独立断言）
+    │   ├── WaterfallFocus.swift                  指针 → 卡片的命中判定（纯计算，可独立断言）
     │   ├── WaterfallColumnView.swift              瀑布流视图（左右留白，每列完整）
     │   ├── DisplayScrollGeometry.swift            滚动/下拉几何 + 手感曲线（纯计算）
     │   ├── StarfieldModel.swift                   星表 + 透视投影（纯计算，可独立断言）
@@ -250,33 +255,37 @@ ExternaldisplayDemo/
 
 ```
    手机端手势                   共享状态                    外接屏渲染
-GesturePad         ──写──▶   RemoteControl    ──读──▶  ExternalDisplayRootView
-  DragGesture                 scroll / pull            .offset(y:)
-  MagnifyGesture              pointer / tapCount       .scaleEffect()
-  CoreMotion                  pointerSource            laser cursor
+GesturePad           ──写──▶   RemoteControl    ──读──▶  ExternalDisplayRootView
+  TouchSurface（UIKit）         scroll / pull            .offset(y:)
+  MagnifyGesture                pointer / tapCount       .scaleEffect()
+  CoreMotion                    pointerSource            laser cursor
 ```
 
 | 手势 | 手机端采集 | 外接屏响应 |
 | --- | --- | --- |
-| **单指上下拖动** | `DragGesture`，逐帧增量归一化。**两块 `GesturePad` 都有**（触控板 / 空鼠栏） | 内容列按 `scroll` 偏移（见第九节） |
-| 单指继续下拉 | 同上，越过顶部后自动转成 `pull` | 内容整体下移，露出星海背景墙（见第九节） |
-| 单指轻点 | 同上，位移未越过 slop（8pt） | 光标处扩散一次涟漪（点击确认）。空鼠栏上等同按下「扳机」 |
+| **单指移动**（触控板） | `TouchSurface`，落点即时映射 | 橙色光标环跟手移动，**画面不动** |
+| **双指滑动**（触控板） | 同上，取两指**质心**的逐帧位移 | 内容列按 `scroll` 偏移（见第九节） |
+| **单指上下拖动**（空鼠栏） | 同上，单指即滚动 | 同上 |
+| 继续下拉 | 同上，越过顶部后自动转成 `pull` | 内容整体下移，露出星海背景墙（见第九节） |
+| 单指轻点 | 同上，位移未越过 slop（8pt）且**全程只有一根手指** | 光标处扩散一次涟漪（点击确认）。空鼠栏上等同按下「扳机」 |
 | 转动手机 | `CoreMotion`（`AirMouse`） | 红色激光指针 + 拖尾；同时驱动星海视差 |
 | 双指捏合 | `MagnifyGesture`，**仅触控板** | hero 图案画布 `.scaleEffect(zoom)` |
 | 手指落点 → 光标环 | **仅触控板**（空鼠栏 `mapsPointer: false`） | 橙色光标环 |
 
-> 前四行是**两块采集面共有**的能力，后两行只有触控板有。
-> 换句话说：**空鼠栏不是"只能轻点"** —— 它和触控板一样能上下拖动滚动、能下拉露背景墙。
-> 它少的只是"手指落点当光标"和"双指捏合"，因为光标归陀螺仪、捏合与瞄准姿态无意义。
+> 触控板把**单指留给光标、双指留给滚动** —— 两种意图各占一种指数，
+> 不靠位移方向去猜（方向会猜错，指数不会）。空鼠栏反过来：手机举在手上，
+> 腾第二根手指去滑面板既别扭又会带歪姿态，所以那里单指就能滚。
+> 两块面的**判定逻辑完全同源**，只差 `scrollGesture` 这一个参数。
 
 ### 两块采集面，一份逻辑
 
 触控板（`RemoteControlPad`）与空鼠栏（`AirMousePad`）各有一块 `GesturePad`，
-差别只有三个参数：提示文案、高度、以及**落点要不要映射成光标**。
+差别只有四个参数：提示文案、高度、**落点要不要映射成光标**、
+以及**多少根手指算滚动**（`scrollGesture`）。
 
-**滚动这条链路两块面完全一致**：上下拖动 → 逐帧增量 → `RemoteControl.scroll(by:)`，
-连 slop、归一化分母、逐帧增量算法都是同一份代码。做成一个视图而不是复制两份，
-就是为了让两处的手感**必然**一致 —— 复制的话迟早有一处被改了分母而另一处没跟上。
+**判定链路两块面完全一致**：触摸 → 锚点逐帧增量 → `RemoteControl`，
+连 slop、归一化分母、指数变化时的处理都是同一份代码。做成一个视图而不是复制两份，
+就是为了让两处的判定**必然**一致 —— 复制的话迟早有一处被改了分母而另一处没跟上。
 
 空鼠栏为什么也要能滚：空鼠的交互是「抬手瞄准 + 确认」，而确认原本只有一个「扳机」按钮。
 但空鼠工作时手机是被**举起来**的，手指去够底部那个按钮既别扭、又会带歪姿态 ——
@@ -303,20 +312,51 @@ GesturePad(..., mapsPointer: false, ...)   // 空鼠栏
 注意这个开关**只影响落点，不影响轻点** —— 断言里单独守了这条
 （`mapsPointer = false 不影响轻点`）。
 
-### 一个手势识别器同时管滚动和轻点
+### 触摸层：`TouchSurface` 读手指，`PadGesture` 判意图
 
 ```
 按下 ──┬─ 位移没越过 slop（8pt）就抬起 ──▶ 轻点：点击确认
        └─ 位移越过 slop ──────────────▶ 拖动：开始滚动
 ```
 
+采集由 `TouchSurface`（`Sources/App/`）那块**透明的 UIKit 视图**做，
 判定逻辑全在 `PadGesture`（`Sources/Core/`）这个**纯状态机**里，视图只负责转发。
-三个容易写错的点：
+
+#### 为什么手势层落在 UIKit
+
+SwiftUI 在 iOS 17 上**拿不到手指数量**：
+
+| 手势 | 拿得到 | 拿不到 |
+| --- | --- | --- |
+| `DragGesture` | 第 1 指的累计位移 + 落点 | **手指数量** |
+| `MagnifyGesture` | 两指间距比 | 质心平移 |
+| `RotateGesture` | 旋转角 | 与需求无关 |
+| `SpatialEventGesture` | 多指事件流 | **要 iOS 18+**，本工程 target 17.0 |
+
+而"单指移光标 / 双指滚画面"唯一的分辨依据就是手指数量，
+所以这一层只能自己去读 `touchesBegan/Moved/Ended`。
+
+`TouchCaptureView.isMultipleTouchEnabled` 是那块视图里**最要命的一行**：
+默认 `false` 时 UIKit 只投递第一根手指，症状与 SwiftUI 的 `DragGesture` 一模一样，
+而且不会报任何错 —— 少了它，整个文件白写。
+
+上报用 `event.allTouches` 而不是回调参数里的那个集合：参数只带**本次变化**的手指，
+而状态机要的是"现在一共几根"。第二根手指落下时，参数里只有它自己。
+
+`UIPanGestureRecognizer` 也不行：它只在自己认可之后才开始上报，
+起手那段位移会被它吞掉 —— 而那段在 `PadGesture` 里是要参与 slop 判定的。
+
+#### 五个容易写错的点
 
 - **slop 内的位移必须被吃掉，不能补发**。不补发是"起手不跳"的前提；
   若反过来先滚动、抬起时再补一次点击，那么每次轻点都会顺带把画面推走几个点。
-- **逐帧增量必须用累计位移之差**。`DragGesture.translation` 是累计值，
-  直接拿它当增量，滚动速度会随拖拽时长线性放大。
+- **逐帧增量用相邻两个锚点之差**。锚点就是手指当前位置；
+  直接拿"从按下到现在的总位移"当增量，滚动速度会随拖拽时长线性放大。
+- **指数一变，那一帧整个吃掉**。两指变一指时锚点会从**质心跳到剩下那根手指**
+  （断言里实测 +40pt）。不吞掉，它要么被当成一次大位移滚出去，要么把光标瞬间拽走。
+  死区也跟着重开 —— 换了手指组合就是换了手势意图。
+- **多指会话整段关掉光标与轻点**，判据是"本会话出现过的**最多**指数"而不是当前指数。
+  否则双指滑完抬手，剩下的那根手指会把光标拽到自己身上。
 - **只取纵向分量，但横向分量不拦截**。这就是"上下滑动（左右可以）"这句需求的全部含义：
   斜着划照样能滚，只是横向那段不产生位移。若改成"只认纯竖向拖动"，
   斜拖会被判成手势失败，手感立刻变粘。
@@ -325,7 +365,9 @@ GesturePad(..., mapsPointer: false, ...)   // 空鼠栏
 抬手时误触发一次点击比漏掉一次更让人恼火。
 
 完整推导、四个易错点与 27 条断言清单见
-[`docs/devnotes/2026-09-24-airmouse-gesture.md`](docs/devnotes/2026-09-24-airmouse-gesture.md)。
+[`docs/devnotes/2026-09-24-airmouse-gesture.md`](docs/devnotes/2026-09-24-airmouse-gesture.md)；
+双指改造那一段见
+[`docs/devnotes/2026-09-24-trackpad-two-finger.md`](docs/devnotes/2026-09-24-trackpad-two-finger.md)。
 
 其余实现要点：
 
@@ -333,7 +375,7 @@ GesturePad(..., mapsPointer: false, ...)   // 空鼠栏
   小窗口，尺寸差一个数量级。`RemoteControl.scroll` 存 `0...1` 的进度，外接屏侧用
   `ScrollMetrics` 按自身内容高度换算实际位移，同一份手机端状态在哪块屏上都成立。
 - **拖拽增量要自己算**（`MagnifyGesture` 的 `magnification` 同理，也是累计值；
-  单指那一路的算法见上）。
+  触摸那一路的算法见上）。
 - **滚动与下拉是同一个标量的两段**，不是两个维度。见第九节。
 - **`.frame()` 不指定对齐会居中**。滚动内容高度（本工程约 446pt）远超视口（约 203pt），
   `.frame(width:height:)` 默认居中会把内容上移半个差值 —— 表现是「滚动起点就少了两条内容」。
@@ -342,19 +384,32 @@ GesturePad(..., mapsPointer: false, ...)   // 空鼠栏
 > **验证边界**：`xcrun simctl` 没有触摸注入 API，Xcode 27 的模拟器 GUI（DeviceHub）也没有
 > 可脚本化的设备窗口，所以「手指按下 → 产生什么动作」这条链路**曾经**完全无法自动化验证。
 > 后来把手势判定抽成纯状态机 `PadGesture`（见上），这半条链路就可以喂事件断言了 ——
-> 目前覆盖 slop 边界、轻点判定、逐帧增量、方向、开关与取消，共 27 条。
-> 仍然只能手点的是「手势能不能被识别到」这一层（SwiftUI 的手势分发本身）。
+> §9 覆盖 slop 边界、轻点判定、逐帧增量、方向、开关与取消（27 条），
+> §9b 覆盖双指滚动、指数变化、质心折算与空鼠栏回归（17 条），合计 44 条。
+>
+> 仍然只能手点的是「触摸到底有没有被 UIKit 收到」这一层（`TouchSurface` 自身）。
+> **这层在本机没有自动验证手段**：触摸注入没有 API，而本机 Xcode 是精简安装
+> （`…/Developer/Applications/Simulator.app` 不存在），模拟器 GUI 也起不来。
+> 换过触摸层之后必须手动过一遍 [`docs/devnotes/2026-09-24-trackpad-two-finger.md`](docs/devnotes/2026-09-24-trackpad-two-finger.md)
+> 里那张验收表 —— 尤其是「单指拖动时画面**不动**」这条，它是整次改造的判据。
 > 「状态 → 渲染」那半条已用 `-remoteState` 预置参数逐状态截图验证过
 > （`scroll = 0.62` / `zoom = 1.9` / `pointer = (0.3, 0.35)`）：可见内容恰为条目 04（顶部被切）～11，
 > 光标环实测落点 `(109.5, 70.8)pt`，与计算值 `(108.6, 71.0)pt` 一致。
 >
 > **手势归属靠结构保证，不靠运气**。触控板最初放在 `Form` 里，它的 `DragGesture` 会与外层
 > 滚动视图的竖向 pan 手势竞争 —— 而 SwiftUI **没有**能压过祖先 `ScrollView` 的公开 API
-> （`highPriorityGesture` 只影响当前视图与其子视图）。现在改由 `RemoteControlDock` 经
+> （`highPriorityGesture` 只影响当前视图与其子视图）。
+> 换成 UIKit 触摸层之后这条约束**只会更硬**：祖先 `ScrollView` 的 pan 识别器一旦认可，
+> 会直接给采集视图发 `touchesCancelled`，比手势竞争更难察觉 —— 所以它同样必须待在
+> 滚动区域之外。现在改由 `RemoteControlDock` 经
 > `.safeAreaInset(edge: .bottom)` 挂在滚动区域**之外**，归属没有歧义，
 > 顺带省掉了「要先滚动才能摸到遥控板」这一步。遥控台默认收起只留读数栏，
 > 展开才铺开触控板 —— 这样它和模拟外接屏窗口能同时看见。
 > 遥控台自身高度会实时上报给替身窗口，让它始终避开（见第六节第 12 条）。
+>
+> 想从**体感**角度理解"为什么这里的上下滑动这么跟手"（位移逐帧直连、
+> slop 不补发、单一权威标量、以及为什么**没有**惯性），见
+> [`docs/scroll-feel.md`](docs/scroll-feel.md)。
 
 ---
 
@@ -413,9 +468,10 @@ open ExternalDisplayDemo.xcodeproj
    那棵视图树；必须从手机侧中继（见第四节）。
 10. **滚动内容的 `.frame` 没写 `alignment: .topLeading`** → 内容比视口高时会被居中，
     表现是「滚动起点凭空少了两条内容」，且滚到底也差一截。
-11. **把带 `DragGesture` 的触控板放进 `Form` / `ScrollView`** → 与外层滚动视图的竖向 pan
-    手势竞争，而 SwiftUI 没有能压过祖先 `ScrollView` 的公开 API。必须挂到滚动区域之外
-    （`.safeAreaInset`），或换成承载 `UIPanGestureRecognizer` 的 `UIViewRepresentable`。
+11. **把带手势采集的触控板放进 `Form` / `ScrollView`** → 与外层滚动视图的竖向 pan
+    手势竞争。SwiftUI 的 `DragGesture` 没 API 能压过祖先 `ScrollView`；
+    换成 UIKit 触摸层更糟 —— 祖先的 pan 识别器会给采集视图发 `touchesCancelled`
+    （表现是拖动中途突然停住）。必须挂到滚动区域之外（`.safeAreaInset`）。
 12. **让浮层窗口与底部常驻 UI 抢位置** → 替身窗口在 `.normal + 1` 层永远盖住主窗口，
     必须主动为底部面板预留空间（见第五节），否则展开时会遮住面板标题栏。
     **预留量必须实测，不能写死**：遥控台收起约 50pt、展开后三四百点，各栏还不一样高。
@@ -468,6 +524,18 @@ open ExternalDisplayDemo.xcodeproj
     空鼠栏加了一块手势面 → 遥控台变高 → 替身窗口按老的固定预留量摆位 →
     「触控板 / 空鼠」切换器被盖住。改动本身没问题，是**别人的常数**失效了。
     所以：凡是"某个视图的高度/宽度被别人当作常数依赖"的地方，都应该改成实测上报。
+26. **`TouchCaptureView` 忘了 `isMultipleTouchEnabled = true`** → UIKit 默认只投递
+    **第一根**手指，双指滑动永远进不来。症状与「根本没写手势」一模一样，且不报任何错 ——
+    排查时很难想到是这一行。
+27. **读取触摸时用回调参数而不是 `event.allTouches`** → 回调参数只带**本次变化**的手指。
+    第二根手指落下时参数里只有它自己（`touches.count == 1`），状态机会误判成单指，
+    于是"双指滚动"变成"光标被质心拽着走"。要的是"现在一共几根"。
+28. **指数变化时不重设锚点，直接算增量** → 两指变一指时锚点会从**质心跳到剩下那根手指**
+    （断言里实测 +40pt），那一跳会被滚出去或把光标拽走。凡是"参考点会因状态切换而跳变"
+    的地方，切换那一帧都必须**吃掉、不补发** —— 与 slop 同一条纪律。
+29. **把"可断言"当成"已验证"** → 断言只能覆盖喂进去的那段纯逻辑；
+    「触摸到底有没有被 UIKit 收到」不在这段里。换触摸层这类改动，
+    纯逻辑全绿**不等于**功能可用，必须另外手点一遍。
 
 ---
 
@@ -655,7 +723,7 @@ Debug 模拟器零告警构建通过；带 `-mockExternalDisplay` 与不带两�
 
 | 端 | 在哪 | 干什么 |
 | --- | --- | --- |
-| 输入 | `GesturePad`（第四节，**触控板与空鼠栏各一块**） | 手指上下拖动 → `PadGesture` → `RemoteControl.scroll(by:)` |
+| 输入 | `GesturePad`（第四节，**触控板与空鼠栏各一块**） | 触摸 → `PadGesture` → `RemoteControl.scroll(by:)`（触控板认双指、空鼠栏认单指） |
 | 输出 | `ExternalDisplayRootView` | 读 `remote.scroll` / `pull` → 算 `.offset(y:)` |
 
 本节只讲**输出端**的几何；输入端（slop、逐帧增量、两块面的差异）在第四节。
@@ -725,6 +793,40 @@ var columnWidth: CGFloat { (columnFieldWidth - 列间距) / columns }
 > 早先这里是**反向**的：`horizontalBleed` 让内容向两侧各溢出约 100pt，最外两列被
 > 屏幕边缘切开，用「内容比屏幕宽」来暗示两侧还有东西。改成正向后每一列都完整。
 > 见 [`docs/devnotes/2026-09-24-waterfall-inset-focus.md`](docs/devnotes/2026-09-24-waterfall-inset-focus.md)。
+
+### item focus：指针落在哪张卡上
+
+触控板 / 空鼠模式下，指针落进某张卡片的范围时，那一张会亮起焦点环与光晕。
+分两态：**悬浮**（白色细环 + 柔光晕）与**选中**（激光红粗环 + 浓光晕；
+轻点 / 扳机确认，再点同一张取消）。其余卡片维持原样，不加环也不加光晕。
+
+判定**只能在外接屏这侧算** —— 外接屏收不到触摸，光标位置是手机端送过来的，
+而视口尺寸、hero 高度、内容的滚动位移全都在渲染侧。所以抽成纯函数
+`WaterfallFocus`（只吃 `CoreGraphics`，不认识 SwiftUI），可以在没有视图、
+没有模拟器的情况下跑断言：
+
+```swift
+focus.item(at: viewportPoint, contentOffsetY: offsetY)   // → Int?
+```
+
+两个关键点：
+
+- **落位坐标取「列排布区」而不是视口**，与左右留白解耦。`fieldOrigin` 只在
+  视口尺寸变化时重算，`contentOffsetY` 每帧传进来 —— 前者是布局、后者是滚动，
+  更新频率差两个数量级，混在一起就分不开"内容滚了"和"布局变了"。
+- **半开区间**（`CGRect.contains`）：相邻两张卡之间那条边界只归属其中一张，
+  既不会同时命中两个，也不会两边都落空。
+
+选中态存在 `RemoteControl` 而不是渲染侧的 `@State` —— 这是本工程里**唯一一条
+「外接屏 → 模型」的反向写入**。理由是可验证性：`simctl` 没有触摸注入 API，
+"点一下卡片"在自动化里做不到；状态只在视图内部的话，选中态就只能靠手点截图。
+进了模型之后 `-remoteState pointer=0.3:0.4,selected=7` 就能一次截出来。
+
+**环的阴影在近黑底上只能是"光"。** 第一版用黑色投影，截图放大之后一点痕迹都没有 ——
+卡片背后那层底是 `Color(red: 0.004, ...)`。两态因此都改成 glow，只换颜色与半径。
+
+完整推导、实测与三个已知限制见
+[`docs/devnotes/2026-09-24-waterfall-inset-focus.md`](docs/devnotes/2026-09-24-waterfall-inset-focus.md)。
 
 ### 星海：假 3D 的关键是"压缩过的透视"
 

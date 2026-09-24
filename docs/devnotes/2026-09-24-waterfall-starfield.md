@@ -141,6 +141,12 @@ static func columnCount(for viewport: CGSize) -> Int {
 
 ### 左右出血：让内容比屏幕宽
 
+> **已被取代（2026-09-24）**：出血改成了正常的左右边距 ——
+> `horizontalBleed`（内容向两侧各溢出约 100pt）→ `horizontalInset`
+> （两侧各留白，1080p 上 75.6pt），最外两列不再被屏幕边缘切开。
+> 见 [`2026-09-24-waterfall-inset-focus.md`](2026-09-24-waterfall-inset-focus.md) 第一节。
+> 本节保留当时的推导与踩坑，不再代表当前实现。
+
 最外两列被屏幕边缘**切开**（参考 1920×1080 外接屏上每侧约 100pt），
 一眼看出内容比屏幕宽、两侧还有东西。
 

@@ -21,7 +21,7 @@ struct RemoteControlDock: View {
     /// 手机端把操作送到眼镜屏的两种方式。二者共用 `RemoteControl` 的同一个落点，
     /// 只是采集源与光标外观不同。
     enum ControlMode: String, CaseIterable, Identifiable {
-        /// 手机屏当触控板，单指拖动移动光标 / 滚动。
+        /// 手机屏当触控板，单指移动光标、双指滚动。
         case trackpad
         /// 手机当空鼠，抬手转动手机移动激光指针。
         case airMouse

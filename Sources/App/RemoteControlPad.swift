@@ -9,9 +9,13 @@ import SwiftUI
 /// 这里采集，再经 `RemoteControl` 单向送到外接屏的渲染视图。
 ///
 /// 采集到的手势（全部由 `GesturePad` 承担，本类只负责接线）：
-/// - 单指拖动 → 滚动，手指落点同时映射为外接屏上的光标
+/// - 单指移动 → 移动外接屏上的光标，**不**滚动
+/// - 双指滑动 → 滚动，滚动量取两指质心的位移
 /// - 单指轻点 → 点击确认
 /// - 双指捏合 → 缩放（模拟器需按住 Option 拖拽）
+///
+/// 单指与双指各占一样，是为了让"我要移光标"和"我要滚画面"两种意图
+/// 不靠位移方向去猜 —— 猜错一次就是一次误操作，而手指数量是明确的。
 ///
 /// 另配绝对定位控件（滑杆 / 按钮）作为兜底：模拟器里捏合手势不好操作，
 /// 且真机上也常有"精确调到某个值"的需求。
@@ -43,11 +47,13 @@ struct RemoteControlPad: View {
     private var trackpad: some View {
         GesturePad(
             hints: [
-                GesturePadHint(text: "单指拖动 → 滚动外接屏"),
-                GesturePadHint(text: "顶部继续下拉 → 露出星海背景墙"),
+                GesturePadHint(text: "单指移动 → 移动光标"),
+                GesturePadHint(text: "双指滑动 → 滚动外接屏"),
+                GesturePadHint(text: "顶部继续下拉 → 露出星海背景墙", isSecondary: true),
                 GesturePadHint(text: "轻点 → 点击确认"),
                 GesturePadHint(text: "双指捏合 → 缩放（模拟器按住 Option）", isSecondary: true)
             ],
+            scrollGesture: .twoFinger,
             // 捏合中禁掉滚动，否则一次捏合会顺带把画面滑走
             isScrollEnabled: !isMagnifying,
             isBusy: isMagnifying,
