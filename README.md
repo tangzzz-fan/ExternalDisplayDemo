@@ -206,8 +206,8 @@ ExternaldisplayDemo/
     │   ├── ExternalDisplaySceneDelegate.swift     ★ iOS 17~26 的接入落点
     │   ├── ExternalDisplayRootView.swift          外接屏根视图（纯输出，无手势，自测量分辨率）
     │   ├── DisplayPatternCanvas.swift             逐帧渲染验证
-    │   ├── WaterfallLayout.swift                  瀑布流布局 + 左右出血几何（纯计算，可独立断言）
-    │   ├── WaterfallColumnView.swift              瀑布流视图（卡片在屏幕边缘被切开）
+    │   ├── WaterfallLayout.swift                  瀑布流布局 + 左右边距几何（纯计算，可独立断言）
+    │   ├── WaterfallColumnView.swift              瀑布流视图（左右留白，每列完整）
     │   ├── DisplayScrollGeometry.swift            滚动/下拉几何 + 手感曲线（纯计算）
     │   ├── StarfieldModel.swift                   星表 + 透视投影（纯计算，可独立断言）
     │   └── StarfieldBackdrop.swift                星海背景墙（TimelineView + Canvas）
@@ -440,12 +440,12 @@ open ExternalDisplayDemo.xcodeproj
 17. **给 `@Observable` 类的默认参数写 `.shared`** → 默认参数表达式在**调用方**上下文求值，
     触发「main actor-isolated property can not be referenced from a nonisolated context」告警。
     改成 `= nil` 再在函数体里解析。
-18. **让内容溢出父视图时没锁死父视图宽度** → 父级被出血的子视图撑宽，
+18. **让内容溢出父视图时没锁死父视图宽度** → 父级被子视图撑宽，
     「在屏幕边缘切开」变成「整片内容右移」。与第 10 / 15 条同源（都是"子视图超出父视图"），
     但这次问题不在**对齐**而在**尺寸**。
 19. **一个内边距值兼任两个方向** → `inset` 同时当左右内边距时，
     "让内容溢出屏幕"这个需求根本写不出来（只能写负数内边距，而负数会被父级裁剪夹回来）。
-    横向需求一变，竖向节奏就被迫跟着变。拆成 `.padding(.vertical, _)` + 独立的出血量。
+    横向需求一变，竖向节奏就被迫跟着变。拆成 `.padding(.vertical, _)` + 独立的横向留白量。
 20. **放宽随机区间之后，没回头检查原有的"安全边界"是否仍然成立** →
     色相抖动从 ±0.025 放宽到 ±0.045 后，锚点 `0.09` 加满抖动是 `0.135`，
     越过了刻意避开的黄绿区间（低明度下是橄榄绿），屏幕上冒出一张脏卡。
@@ -699,28 +699,32 @@ position < 0  →  顶部下拉的超出行程
 高度分布刻意不是均匀的：均匀铺满一个大区间会让长短卡五五开，看起来是"随机"而不是
 "错落"。主体保持中等长度、少量长条插进去当锚点，才有节奏。
 
-### 左右出血：让内容比屏幕宽
+### 左右边距：内容收进屏内
 
-最外两列被屏幕边缘**切开**（参考 1920×1080 外接屏上每侧约 100pt），
-一眼看出内容比屏幕宽、两侧还有东西。做法是让**列排布区**比视口宽：
+最外两列**完整**落在屏内，与屏幕左右边缘各留出 `horizontalInset`
+（参考 1920×1080 外接屏上 75.6pt）。做法是让**列排布区**比视口**窄**：
 
 ```swift
-var horizontalBleed: CGFloat { base * 0.093 }          // 1080p 上 ≈ 100pt
-var columnFieldWidth: CGFloat { viewport.width + horizontalBleed * 2 }
+var horizontalInset: CGFloat { base * 0.07 }                    // 1080p 上 ≈ 75.6pt
+var columnFieldWidth: CGFloat { max(0, viewport.width - horizontalInset * 2) }
 var columnWidth: CGFloat { (columnFieldWidth - 列间距) / columns }
 ```
 
-三个必须同时成立的条件，少一个就不成立：
+它与竖向 `inset` **同源**，于是瀑布流与 hero 的左右边正好对齐 —— 四个方向的留白
+是同一个量级，画面上不会出现说不清的错位。
 
-1. **容器宽度锁死为视口宽**（`.frame(width: viewport.width)`）。容器一旦被出血的
-   瀑布流撑宽，切口就跑到屏幕外，整片内容看起来像整体右移了。
-2. **内边距只加竖向**（`.padding(.vertical, inset)`）。横向一旦补上内边距，
-   出血就被夹回屏幕里 —— 早先 `inset` 同时兼任左右内边距，这个需求根本写不出来。
-3. **hero 不参与出血**，左右内边距由它自己补。它的圆角是画面上的显式形状，
-   被屏幕边缘切掉会看起来像布局错了。
+三个必须同时成立的条件：
 
-溢出部分不需要任何额外裁剪：容器宽度 == 视口宽，而容器的左右边就是屏幕的左右边
-（根视图 `.frame(alignment: .topLeading)`），容器自己的 `clipShape` 正好切在屏幕边缘。
+1. **容器宽度仍锁死为视口宽**（`.frame(width: viewport.width)`）。父级 VStack 拿到的
+   宽度一旦被子视图撑宽，圆角、阴影、下拉位移都会跟着跑偏。
+2. **两侧留白由瀑布流内部让出**：排布区比视口窄，居中放置后自然内缩。
+   容器那边不需要为横向做任何事（`.padding(.vertical, _)` 只管竖向）。
+3. **hero 自己补左右内边距**，取同一个 `horizontalInset`。它的圆角是画面上的
+   显式形状，被屏幕边缘切掉会看起来像布局错了。
+
+> 早先这里是**反向**的：`horizontalBleed` 让内容向两侧各溢出约 100pt，最外两列被
+> 屏幕边缘切开，用「内容比屏幕宽」来暗示两侧还有东西。改成正向后每一列都完整。
+> 见 [`docs/devnotes/2026-09-24-waterfall-inset-focus.md`](docs/devnotes/2026-09-24-waterfall-inset-focus.md)。
 
 ### 星海：假 3D 的关键是"压缩过的透视"
 

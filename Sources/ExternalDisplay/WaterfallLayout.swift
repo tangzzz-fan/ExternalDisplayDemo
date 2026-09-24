@@ -85,28 +85,31 @@ struct WaterfallMetrics: Equatable, Sendable {
 
     /// 竖向节奏：内容块的上下内边距，以及 hero 与瀑布流之间的间距。
     ///
-    /// **只用于竖向**。横向由 `horizontalBleed` 负责 —— 早先这一个值同时
-    /// 兼任左右内边距，于是"让内容溢出屏幕"这个需求根本表达不出来。
+    /// **只用于竖向**。横向由 `horizontalInset` 负责 —— 早先这一个值同时
+    /// 兼任左右内边距，横向需求一变竖向就被迫跟着变。
     var inset: CGFloat { base * 0.07 }
 
-    /// 左右出血：内容向两侧**各溢出视口多少点**。
+    /// 内容区左右留白：列排布区离屏幕左右边缘各多少点。
     ///
-    /// 目的是让最外两列被屏幕边缘切开，一眼看出内容比屏幕宽、两侧还有东西。
+    /// 与 `inset` 同源（`base × 0.07`）—— 于是瀑布流与 hero 的左右边正好对齐，
+    /// 四个方向的留白也是同一个量级。
+    ///
     /// 用 `base` 的比例而不是写死点数：本项目所有排版都按画面短边等比缩放，
     /// 写死 100pt 在 4K 上几乎看不见、在 letterbox 小窗口上会把整列吃掉。
-    /// 比例 `0.093` 在参考的 1920×1080 外接屏（`base` = 1080）上正好是 100pt。
-    var horizontalBleed: CGFloat { base * Self.bleedRatio }
-
-    static let bleedRatio: CGFloat = 0.093
+    ///
+    /// 早先这里是**负向**的（`horizontalBleed`：内容向两侧各溢出约 100pt，
+    /// 最外两列被屏幕边缘切开）。改成正向后内容整体收进屏内，每一列都完整。
+    var horizontalInset: CGFloat { base * 0.07 }
 
     var columnSpacing: CGFloat { base * 0.022 }
     var itemSpacing: CGFloat { base * 0.022 }
 
-    /// 列排布区宽度 = 视口宽 + 两侧出血。
+    /// 列排布区宽度 = 视口宽 − 两侧留白。
     ///
-    /// 注意它**大于**视口宽 —— 多出来的那部分被屏幕边缘切掉，那就是出血本身。
-    /// 列宽从这个宽度里等分出来，于是最外两列天生就是"不完整"的。
-    var columnFieldWidth: CGFloat { viewport.width + horizontalBleed * 2 }
+    /// 注意它**小于**视口宽 —— 每列都完整落在屏内，没有任何一列被边缘切掉。
+    /// 下限 `0` 只是护栏：视口窄到装不下两侧留白时，列宽会退化成 0，
+    /// 那比让这个值变成负数（负宽度的 `frame`）更容易看出问题出在哪。
+    var columnFieldWidth: CGFloat { max(0, viewport.width - horizontalInset * 2) }
 
     /// 列宽。排布区被 `columns` 等分（扣掉列间距）。
     var columnWidth: CGFloat {

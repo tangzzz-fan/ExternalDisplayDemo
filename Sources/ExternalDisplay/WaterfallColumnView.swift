@@ -17,11 +17,10 @@ import SwiftUI
 /// 所以也就没有 `Lazy*` 容器的按需创建。所有卡片一次性建出来。
 /// 40~80 张在这个量级完全没问题；真要上百张得自己写回收池。
 ///
-/// ## 左右出血
-/// 列排布区（`columnFieldWidth`）比视口宽 `horizontalBleed * 2`，
-/// 两侧各溢出 `horizontalBleed`，于是最外两列被屏幕边缘切开。
-/// 溢出部分由**容器**的 `clipShape` 在屏幕边缘切掉（容器宽度锁死为视口宽，
-/// 见 `ExternalDisplayRootView.contentColumn`）—— 这里不做任何裁剪。
+/// ## 左右边距
+/// 列排布区（`columnFieldWidth`）比视口**窄** `horizontalInset * 2`，
+/// 于是每一列都完整落在屏内，最外两列不再被屏幕边缘切开。
+/// 留白由外层那个「视口宽」的 frame 居中让出 —— 这里不做任何裁剪。
 struct WaterfallColumnView: View {
 
     let layout: WaterfallLayout
@@ -47,9 +46,9 @@ struct WaterfallColumnView: View {
             }
         }
         .frame(width: metrics.columnFieldWidth, alignment: .top)
-        // 外层再套一个**视口宽**的 frame：排布区比它宽，居中放置后两侧各溢出
-        // `horizontalBleed` —— 这就是出血。同时让父级 VStack 拿到的宽度仍然
-        // 是视口宽，否则容器会被撑宽，圆角、阴影、下拉位移全跟着跑偏。
+        // 外层再套一个**视口宽**的 frame：排布区比它窄，居中放置后两侧各让出
+        // `horizontalInset` —— 这就是左右边距。同时让父级 VStack 拿到的宽度
+        // 仍然锁死为视口宽，容器不会被撑宽，圆角、阴影、下拉位移都不会跑偏。
         .frame(width: metrics.viewport.width, alignment: .center)
     }
 
