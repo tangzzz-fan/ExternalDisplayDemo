@@ -16,10 +16,22 @@ import SwiftUI
 /// 外接屏侧不能用 `ScrollView`（见 `ExternalDisplayRootView` 的说明），
 /// 所以也就没有 `Lazy*` 容器的按需创建。所有卡片一次性建出来。
 /// 40~80 张在这个量级完全没问题；真要上百张得自己写回收池。
+///
+/// ## 左右出血
+/// 列排布区（`columnFieldWidth`）比视口宽 `horizontalBleed * 2`，
+/// 两侧各溢出 `horizontalBleed`，于是最外两列被屏幕边缘切开。
+/// 溢出部分由**容器**的 `clipShape` 在屏幕边缘切掉（容器宽度锁死为视口宽，
+/// 见 `ExternalDisplayRootView.contentColumn`）—— 这里不做任何裁剪。
 struct WaterfallColumnView: View {
 
     let layout: WaterfallLayout
     let metrics: WaterfallMetrics
+
+    /// 底栏文案。与 `WaterfallItem.captionCount` 一一对应，
+    /// 取用时取模兜底，两处数量对不上也不会崩。
+    private static let captions = [
+        "内容条目", "精选合集", "编辑推荐", "专题报道", "专栏文章", "图集速览"
+    ]
 
     var body: some View {
         HStack(alignment: .top, spacing: metrics.columnSpacing) {
@@ -34,12 +46,18 @@ struct WaterfallColumnView: View {
                 .frame(width: metrics.columnWidth, alignment: .top)
             }
         }
+        .frame(width: metrics.columnFieldWidth, alignment: .top)
+        // 外层再套一个**视口宽**的 frame：排布区比它宽，居中放置后两侧各溢出
+        // `horizontalBleed` —— 这就是出血。同时让父级 VStack 拿到的宽度仍然
+        // 是视口宽，否则容器会被撑宽，圆角、阴影、下拉位移全跟着跑偏。
+        .frame(width: metrics.viewport.width, alignment: .center)
     }
 
     // MARK: - 卡片
 
     private func card(_ item: WaterfallItem) -> some View {
         let height = layout.heights[item.id] ?? metrics.unitHeight
+        let cornerRadius = metrics.base * 0.018 * item.cornerScale
         let footerHeight = min(
             max(height * 0.30, metrics.base * 0.072),
             metrics.base * 0.095
@@ -51,16 +69,19 @@ struct WaterfallColumnView: View {
                 .frame(height: footerHeight)
         }
         .frame(width: metrics.columnWidth, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: metrics.base * 0.018, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: metrics.base * 0.018, style: .continuous)
-                .stroke(.white.opacity(0.10), lineWidth: 1)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(
+                    .white.opacity(item.isFeatured ? 0.30 : 0.10),
+                    lineWidth: item.isFeatured ? 1.5 : 1
+                )
         }
     }
 
-    /// 封面：主渐变 + 一层斜向高光。
+    /// 封面：主渐变 + 一层同侧高光。
     ///
-    /// 只有主渐变的话，卡片看起来像一张纯色贴纸。叠一层从左上角散开的
+    /// 只有主渐变的话，卡片看起来像一张纯色贴纸。叠一层从光源方向散开的
     /// 径向高光之后才有了"有光源"的体积感 —— 这一步很便宜，但决定卡片
     /// 是"色块"还是"图"。
     private func cover(_ item: WaterfallItem) -> some View {
@@ -79,13 +100,13 @@ struct WaterfallColumnView: View {
                     brightness: tone.brightness * 0.62
                 )
             ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
+            startPoint: unitPoint(WaterfallItem.gradientStart(for: item.gradientAngle)),
+            endPoint: unitPoint(WaterfallItem.gradientEnd(for: item.gradientAngle))
         )
         .overlay {
             RadialGradient(
-                colors: [.white.opacity(0.16), .clear],
-                center: UnitPoint(x: 0.18, y: 0.12),
+                colors: [.white.opacity(item.isFeatured ? 0.24 : 0.16), .clear],
+                center: UnitPoint(x: item.highlight.x, y: item.highlight.y),
                 startRadius: 0,
                 endRadius: metrics.columnWidth * 1.1
             )
@@ -100,12 +121,13 @@ struct WaterfallColumnView: View {
 
     private func footer(_ item: WaterfallItem) -> some View {
         HStack(spacing: metrics.base * 0.016) {
-            // 一根按色相着色的小竖条：让"这张卡属于哪个色系"在缩略尺度上也读得出来
+            // 一根按色相着色的小竖条：让"这张卡属于哪个色系"在缩略尺度上也读得出来。
+            // 深色中性卡的色相是随机的，这里反而成了一个彩色标记。
             Capsule()
                 .fill(Color(hue: item.tone.hue, saturation: 0.7, brightness: 0.85))
                 .frame(width: max(1.5, metrics.base * 0.008))
 
-            Text("内容条目")
+            Text(Self.captions[item.captionIndex % Self.captions.count])
                 .font(.system(size: metrics.base * 0.038, weight: .medium, design: .rounded))
                 .foregroundStyle(.white.opacity(0.90))
                 .lineLimit(1)
@@ -120,7 +142,11 @@ struct WaterfallColumnView: View {
         }
         .padding(.horizontal, metrics.base * 0.02)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(.white.opacity(0.05))
+        .background(.white.opacity(item.isFeatured ? 0.10 : 0.05))
+    }
+
+    private func unitPoint(_ point: CGPoint) -> UnitPoint {
+        UnitPoint(x: point.x, y: point.y)
     }
 }
 

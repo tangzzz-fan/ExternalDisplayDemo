@@ -30,6 +30,37 @@ struct WaterfallItem: Identifiable, Equatable, Sendable {
 
     /// 卡片配色。
     let tone: WaterfallTone
+
+    /// 圆角倍率，`1.0` 为基准。
+    ///
+    /// 全屏几百张卡共用一个圆角会显出"批量生成"的味道；浮动 ±45% 之后，
+    /// 相邻卡片的轮廓线不再连成一条，观感立刻从"网格"变成"手摆的"。
+    let cornerScale: CGFloat
+
+    /// 封面主渐变的方向角（弧度）。
+    ///
+    /// 固定成 45°（左上 → 右下）时，整片瀑布流像被同一盏灯照亮，
+    /// 越往下看越平。每张卡各带一个方向之后，高光才散得开。
+    let gradientAngle: CGFloat
+
+    /// 封面高光的中心，归一化到卡片内的 `0...1`。
+    ///
+    /// **必须**与 `gradientAngle` 同侧（生成时就按起点抖动出来）：
+    /// 光源和高光各指一个方向的话，卡片会看起来像被两盏灯从相反方向打光，
+    /// 比不打光更假。
+    let highlight: CGPoint
+
+    /// 底栏文案的档位。
+    ///
+    /// 存下标而不是字符串 —— 这一层是纯 `CoreGraphics` 的，不该认识文案；
+    /// 而且字符串一旦进了这里，"换个说法"就要改布局层。
+    let captionIndex: Int
+
+    /// 是否为精选卡：描边更亮、高光更强。
+    ///
+    /// 一成左右的卡片"跳出来"能打断整片均匀的色块节奏，
+    /// 让眼睛有落点 —— 全是同等强度的卡片时，视线会直接滑出画面。
+    let isFeatured: Bool
 }
 
 /// 瀑布流的几何常量。
@@ -52,22 +83,44 @@ struct WaterfallMetrics: Equatable, Sendable {
         self.unitHeight = base * 0.20
     }
 
+    /// 竖向节奏：内容块的上下内边距，以及 hero 与瀑布流之间的间距。
+    ///
+    /// **只用于竖向**。横向由 `horizontalBleed` 负责 —— 早先这一个值同时
+    /// 兼任左右内边距，于是"让内容溢出屏幕"这个需求根本表达不出来。
     var inset: CGFloat { base * 0.07 }
+
+    /// 左右出血：内容向两侧**各溢出视口多少点**。
+    ///
+    /// 目的是让最外两列被屏幕边缘切开，一眼看出内容比屏幕宽、两侧还有东西。
+    /// 用 `base` 的比例而不是写死点数：本项目所有排版都按画面短边等比缩放，
+    /// 写死 100pt 在 4K 上几乎看不见、在 letterbox 小窗口上会把整列吃掉。
+    /// 比例 `0.093` 在参考的 1920×1080 外接屏（`base` = 1080）上正好是 100pt。
+    var horizontalBleed: CGFloat { base * Self.bleedRatio }
+
+    static let bleedRatio: CGFloat = 0.093
+
     var columnSpacing: CGFloat { base * 0.022 }
     var itemSpacing: CGFloat { base * 0.022 }
 
-    /// 列宽。已扣除左右内边距与列间距。
+    /// 列排布区宽度 = 视口宽 + 两侧出血。
+    ///
+    /// 注意它**大于**视口宽 —— 多出来的那部分被屏幕边缘切掉，那就是出血本身。
+    /// 列宽从这个宽度里等分出来，于是最外两列天生就是"不完整"的。
+    var columnFieldWidth: CGFloat { viewport.width + horizontalBleed * 2 }
+
+    /// 列宽。排布区被 `columns` 等分（扣掉列间距）。
     var columnWidth: CGFloat {
-        let usable = viewport.width - inset * 2 - columnSpacing * CGFloat(columns - 1)
+        let usable = columnFieldWidth - columnSpacing * CGFloat(columns - 1)
         return max(0, usable / CGFloat(columns))
     }
 
     /// 权重换算成实际高度。
     ///
-    /// 下限兜住极小权重 —— 高度趋近 0 的卡片在瀑布流里会变成一条缝，
-    /// 既看不见又占着一个列位，比直接裁掉更难看。
+    /// 下限只是**护栏**：正常权重都 ≥ 0.55，这条永远不生效，但能兜住外部
+    /// 传入的异常数据 —— 高度趋近 0 的卡片会变成一条缝，既看不见又占着列位，
+    /// 比直接裁掉更难看。
     func height(for item: WaterfallItem) -> CGFloat {
-        max(unitHeight * 0.72, unitHeight * item.heightWeight)
+        max(unitHeight * 0.50, unitHeight * item.heightWeight)
     }
 
     /// 列数按宽高比选。
@@ -157,10 +210,22 @@ struct SeededGenerator: RandomNumberGenerator {
 
 extension WaterfallItem {
 
+    /// 底栏文案的档位总数。文案本身在视图层 —— 这一层不认识字符串。
+    static let captionCount = 6
+
     /// 演示用的卡片。
     ///
-    /// 高度权重落在 `0.75...1.9`：全部取 `1.0` 就退化成等高网格，看不出瀑布流的
-    /// 错落；范围再大则会出现"一列全是长条、一列全是方块"的失衡。
+    /// 高度权重主体落在 `0.55...1.90`，另有约 **22%** 的卡片被额外拉长
+    /// `0...0.85`，即最高可到 `2.75`。
+    ///
+    /// 为什么不干脆均匀铺满一个大区间：那样长短卡五五开，看起来是"随机"而不是
+    /// "错落"。错落要有节奏 —— 主体保持中等长度，少量长条插进去当视觉锚点。
+    /// 反过来若全部取 `1.0`，就退化成等高网格，根本看不出瀑布流。
+    ///
+    /// 拉长比例为什么是 22% 而不是 17%：`> 1.90`（超出基础区间）的概率是
+    /// `拉长概率 × 约 0.31`，17% 时只有 5% 左右 —— 36 张的演示集里期望值
+    /// 不到两张，长尾实际上看不见，等于白写。22% 之后期望约 2.5 张，
+    /// 每屏都必然能看到几根竖条。
     ///
     /// 配色走**锚点 + 抖动**而不是纯随机色相。纯随机会均匀地洒满整个色轮，
     /// 于是必然抽到荧光绿、屎黄、脏紫这些在暗底上很难看的区间；
@@ -170,12 +235,60 @@ extension WaterfallItem {
         var generator = SeededGenerator(seed: seed)
 
         return (1...count).map { index in
-            WaterfallItem(
-                id: index,
-                heightWeight: 0.75 + CGFloat.random(in: 0...1, using: &generator) * 1.15,
-                tone: WaterfallTone.random(using: &generator)
-            )
+            make(id: index, using: &generator)
         }
+    }
+
+    /// 抽一张卡。所有随机量都在这里，顺序固定 → 同种子必然同结果。
+    private static func make<G: RandomNumberGenerator>(id: Int, using generator: inout G) -> WaterfallItem {
+        // 长条：22% 的卡片额外加 0...0.85 的权重，把少数卡片拉到 2.75 上限。
+        // 在这个量级上，最高的那些卡会从"横条"变成"竖条"（高度超过列宽），
+        // 整片瀑布流的错落感主要就来自这几根。
+        let stretch = roll(&generator) < 0.22 ? roll(&generator) * 0.85 : 0
+        let angle = roll(&generator) * 2 * .pi
+        let start = gradientStart(for: angle)
+
+        return WaterfallItem(
+            id: id,
+            heightWeight: 0.55 + roll(&generator) * 1.35 + stretch,
+            tone: WaterfallTone.random(using: &generator),
+            cornerScale: 0.55 + roll(&generator) * 0.90,
+            gradientAngle: angle,
+            // 高光从渐变起点抖出来：两者同侧，光源才是自洽的
+            highlight: CGPoint(
+                x: clamp(start.x + (roll(&generator) - 0.5) * 0.22, 0.02, 0.98),
+                y: clamp(start.y + (roll(&generator) - 0.5) * 0.22, 0.02, 0.98)
+            ),
+            captionIndex: min(captionCount - 1, Int(roll(&generator) * CGFloat(captionCount))),
+            isFeatured: roll(&generator) < 0.14
+        )
+    }
+
+    /// 主渐变的归一化起点 / 终点。
+    ///
+    /// 只存角度、由角度推出两个端点，而不是直接存两个点：角度是**单一**
+    /// 自由度，推出来的端点必然自洽；存两个点则可能生成出长度不一的向量，
+    /// 渐变斜率会跟着乱。
+    static func gradientStart(for angle: CGFloat) -> CGPoint {
+        CGPoint(x: 0.5 - cos(angle) * 0.5, y: 0.5 - sin(angle) * 0.5)
+    }
+
+    static func gradientEnd(for angle: CGFloat) -> CGPoint {
+        CGPoint(x: 0.5 + cos(angle) * 0.5, y: 0.5 + sin(angle) * 0.5)
+    }
+
+    // MARK: - Helpers
+
+    /// `0...1` 均匀取样。
+    ///
+    /// 写成静态函数而不是嵌套函数：嵌套函数捕获 `inout` 的生成器会触发
+    /// 独占访问检查，每次调用都要写一遍 `CGFloat.random(in:using:)` 又太吵。
+    private static func roll<G: RandomNumberGenerator>(_ generator: inout G) -> CGFloat {
+        CGFloat.random(in: 0...1, using: &generator)
+    }
+
+    private static func clamp(_ value: CGFloat, _ lower: CGFloat, _ upper: CGFloat) -> CGFloat {
+        min(max(value, lower), upper)
     }
 }
 
@@ -183,22 +296,64 @@ extension WaterfallTone {
 
     /// 挑过的色相锚点：靛蓝 → 青 → 蓝绿 → 深青 → 紫罗兰 → 品红 → 玫瑰 → 琥珀 → 铜。
     ///
-    /// 刻意绕开 `0.12...0.35`（黄绿区间）—— 那一段在低明度下会变成橄榄绿和土黄，
-    /// 放在黑色背景上显得很脏。
+    /// 刻意绕开黄绿区间（见 `forbiddenLower` / `forbiddenUpper`）——
+    /// 那一段在低明度下会变成橄榄绿和土黄，放在黑色背景上显得很脏。
     private static let hueAnchors: [CGFloat] = [
         0.55, 0.62, 0.72, 0.80, 0.88, 0.93, 0.97, 0.05, 0.09
     ]
 
+    /// 色相禁区（左闭右开）：黄绿区间。
+    ///
+    /// 低明度下 `0.12...0.35` 会变成橄榄绿和土黄，在近黑底上像一块脏抹布。
+    static let forbiddenLower: CGFloat = 0.12
+    static let forbiddenUpper: CGFloat = 0.35
+
+    /// 反射时至少让开边界这么远。
+    ///
+    /// 只有 `hue` 正好压在边界上时才会用到：那时反射距离是 0，结果还贴在
+    /// 边界上，不满足"严格落在禁区外"这个不变量。生成的色相是连续量、
+    /// 撞上边界的概率为 0 —— 但不变量是要被断言的东西，不能留测度零的例外。
+    private static let boundaryClearance: CGFloat = 1e-9
+
+    /// 把色相从禁区里**反射**出去。
+    ///
+    /// 只靠"锚点挑得够远"是不够的：锚点 `0.09` 加上满额抖动就是 `0.135`，
+    /// 正好落进禁区 —— 这次把抖动从 ±0.025 放宽到 ±0.045 时就真的踩到了，
+    /// 屏幕上冒出一张橄榄金色的卡。**放宽任何随机区间，都要回头检查
+    /// 原有的"安全边界"是否仍然成立。**
+    ///
+    /// 用反射而不是截断：截断会让所有越界取样堆在边界上，
+    /// 于是在 `0.12` 处出现一撮一模一样的颜色；反射保持随机量的幅度、
+    /// 只换方向，分布不会塌缩成一个点。
+    static func escapedHue(_ hue: CGFloat) -> CGFloat {
+        guard hue >= forbiddenLower, hue < forbiddenUpper else { return hue }
+        let toLower = hue - forbiddenLower
+        let toUpper = forbiddenUpper - hue
+        return toLower <= toUpper
+            ? forbiddenLower - max(toLower, boundaryClearance)
+            : forbiddenUpper + max(toUpper, boundaryClearance)
+    }
+
     /// 暗调区间。饱和度给足（避免灰扑扑），明度压低（保住白字可读性）。
+    ///
+    /// 抖动放宽到 ±0.045：相邻锚点最近只差 0.05，再大就会让两组锚点的卡片
+    /// 混成一片、锚点本身失去意义。越界的部分由 `escapedHue` 兜住。
     static func random<G: RandomNumberGenerator>(using generator: inout G) -> WaterfallTone {
         let anchor = hueAnchors.randomElement(using: &generator) ?? 0.6
-        // 抖动 ±0.025：足以让同锚点的相邻卡片区分开，又不会跑到别的色相区
-        let jitter = (CGFloat.random(in: 0...1, using: &generator) - 0.5) * 0.05
+        let jitter = (CGFloat.random(in: 0...1, using: &generator) - 0.5) * 0.09
+
+        // 约一成卡片走"深色中性"：整屏都是饱和色块会像一本色卡册，
+        // 掺一点近乎无彩的深灰蓝，彩色反而更跳。
+        let isNeutral = CGFloat.random(in: 0...1, using: &generator) < 0.12
 
         return WaterfallTone(
-            hue: (anchor + jitter + 1).truncatingRemainder(dividingBy: 1),
-            saturation: 0.30 + CGFloat.random(in: 0...1, using: &generator) * 0.32,
-            brightness: 0.22 + CGFloat.random(in: 0...1, using: &generator) * 0.20
+            hue: escapedHue((anchor + jitter + 1).truncatingRemainder(dividingBy: 1)),
+            saturation: isNeutral
+                ? 0.06 + CGFloat.random(in: 0...1, using: &generator) * 0.10
+                : 0.30 + CGFloat.random(in: 0...1, using: &generator) * 0.38,
+            brightness: isNeutral
+                ? 0.18 + CGFloat.random(in: 0...1, using: &generator) * 0.12
+                : 0.20 + CGFloat.random(in: 0...1, using: &generator) * 0.24
         )
     }
 }

@@ -197,15 +197,26 @@ struct ExternalDisplayRootView: View {
     ///
     /// 两个几何动作叠加在同一次 `.offset` 里（`pullOffset - scrollOffset`），
     /// 而这两段位移分别取自 `RemoteControl` 里同一个标量的正负两段，不会互相污染。
+    ///
+    /// ## 左右出血靠容器自己切
+    /// 瀑布流的列排布区比视口宽（左右各出血），**溢出部分就由这里的
+    /// `clipShape` 切掉** —— 容器宽度锁死为视口宽，而容器的左右边就是屏幕的
+    /// 左右边（根视图 `.frame(alignment: .topLeading)`），于是切口正好落在
+    /// 屏幕边缘。这也是为什么内边距只加竖向：一旦补上左右内边距，
+    /// 出血就被夹回屏幕里了。
     private func contentColumn(_ plan: DisplayPlan) -> some View {
         let pull = remote.pull
         let cornerRadius = plan.scroll.cornerRadius(for: pull, base: plan.base)
+        let viewport = plan.scroll.viewport
 
         return VStack(alignment: .leading, spacing: plan.waterfall.inset) {
             hero(plan)
             WaterfallColumnView(layout: plan.layout, metrics: plan.waterfall)
         }
-        .padding(plan.waterfall.inset)
+        .padding(.vertical, plan.waterfall.inset)
+        // 容器宽度**锁死**为视口宽。这是上面那段说明的前提：容器一旦被出血的
+        // 瀑布流撑宽，切口就跑到屏幕外，整片内容看起来像整体右移了。
+        .frame(width: viewport.width, alignment: .top)
         // 容器背景必须不透明：下拉让出的上半屏要露出星海，若容器透光，
         // 星海会从卡片缝隙里透上来，背景墙的"墙"就立不住了。
         .background(Color(red: 0.004, green: 0.005, blue: 0.014))
@@ -253,6 +264,9 @@ struct ExternalDisplayRootView: View {
         }
         .frame(height: plan.heroHeight)
         .clipShape(RoundedRectangle(cornerRadius: plan.base * 0.022, style: .continuous))
+        // hero 不参与出血：它的圆角是画面上的一个显式形状，被屏幕边缘切掉
+        // 会看起来像布局错了。左右内边距因此由它自己补 —— 容器那边只剩竖向。
+        .padding(.horizontal, plan.waterfall.inset)
     }
 
     // MARK: - 固定 HUD
