@@ -26,6 +26,7 @@ struct AirMousePad: View {
         VStack(spacing: 14) {
             statusRow
             actionRow
+            PanoramaFOVPicker()
             gesturePad
             sensitivityRow
             frameRow
@@ -74,8 +75,8 @@ struct AirMousePad: View {
     /// 一行摘要：可用时间优先，其次是失败原因。
     private var summary: String {
         if let reason = airMouse.state.reason { return reason }
-        if airMouse.warmup.isSynthetic {
-            return "模拟数据源 · 无真实陀螺仪读数（-mockAirMouse）"
+        if let synthetic = airMouse.syntheticSourceNote {
+            return "模拟数据源 · 驱动\(synthetic.target) · 无真实陀螺仪读数（\(synthetic.name)）"
         }
         if let usable = airMouse.warmup.milestones.usable {
             return String(format: "可用时间 %.2f s · 扳机 %d 次", usable, airMouse.triggerCount)
@@ -91,6 +92,21 @@ struct AirMousePad: View {
 
     private var actionRow: some View {
         HStack(spacing: 10) {
+            // 详情页里出现，全景页尤其需要：那一页里姿态喂视角、光标恒为 `nil`，
+            // 而外接屏的返回按钮靠指针命中，扳机点下去只会落进"什么都不做"那一支
+            // （票 `08`）。空鼠开着时手机是被举起来的，手指够不到底部的小按钮，
+            // 所以它和「归零」「扳机」并排、一样大。
+            if remote.detailItemID != nil {
+                Button {
+                    remote.closeDetail()
+                } label: {
+                    Label("返回", systemImage: "chevron.left")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            }
+
             Button {
                 airMouse.recenter()
             } label: {
@@ -135,7 +151,8 @@ struct AirMousePad: View {
                 GesturePadHint(text: "轻点面板 → 确认；详情页双击 → 铺满"),
                 GesturePadHint(text: "单指上下 → 滚动 / 顶部下拉 / 底部上拉"),
                 GesturePadHint(text: "单指左右 → 推开幕墙，露出星海"),
-                GesturePadHint(text: "抬手转动手机 → 移动激光", isSecondary: true)
+                GesturePadHint(text: "全景页：点头 = 俯仰、左右倾 = 横向；双击 = 返回幕墙"),
+                GesturePadHint(text: "抬手转手机 = 移动激光；全景页 = 转视角（拖动同向）", isSecondary: true)
             ],
             height: 190,
             mapsPointer: false,

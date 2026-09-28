@@ -26,6 +26,7 @@ import SwiftUI
 /// StarfieldBackdrop        最底层，固定不动；幕墙半透，缝里看到的就是它
 /// └ contentColumn          幕墙：一块半透光的板，整体随 scroll/pull/lateral 位移
 ///   ├ hero                 图案 canvas（帧驱动演示）+ 标题
+///   ├ 素材条               五条全景素材，点一条直接进它的全景页（票 07）
 ///   └ WaterfallColumnView  瀑布流卡片
 /// ├ hud                    固定，不参与滚动
 /// ├ backButton             固定，浮在板上（不随幕墙位移，否则按不到）
@@ -80,30 +81,54 @@ struct ExternalDisplayRootView: View {
 
     /// 卡片数据。固定种子 → 每次启动的高度与配色完全一致，
     /// 逐状态截图对比才有意义。
-    private static let items = WaterfallItem.demoItems(count: itemCount)
-
-    /// hero 区（图案 canvas + 标题）的理想高度占比。
-    private static let heroHeightRatio: CGFloat = 0.56
-
-    /// hero 区的实际高度。
     ///
-    /// 理想占比会被 `ScrollMetrics.maxLeadingElementHeight` **压低** ——
-    /// 后者是下拉几何反推出的硬上限：`pull = 1` 时可见的内容高度只剩半个视口，
-    /// hero 再高就会被屏幕下沿切掉标题。
+    /// 这是**全集**：详情页查表（`detailItem`）走它 ——
+    /// 筛选只影响幕墙上摆哪些，不该让"正在看的那张照片"因为切了筛选就查不到。
     ///
-    /// 理想值 0.56 在 letterbox 小窗口（362×204 点）上算出来是 114pt，
-    /// 而上限只有 87.6pt —— 也就是说这个场景下**上限才是生效的那个**，
-    /// 占比只是个不越界的愿望。
-    private static func heroHeight(for viewport: CGSize, inset: CGFloat) -> CGFloat {
-        min(
-            viewport.height * heroHeightRatio,
-            ScrollMetrics.maxLeadingElementHeight(viewport: viewport, inset: inset)
-        )
+    /// 非 private：调试预置（`MockRemoteState` 的 `strip=<index>`）要按同一个
+    /// 全集算出条子的槽心落点。各建一份的话，"第几条"两处一旦不一致，
+    /// 预置出来的指针会压到隔壁那条上，而截图里"有个环亮着"。
+    static let items = WaterfallItem.demoItems(count: itemCount)
+
+    /// 素材条上的五条素材。**从全集派生、与筛选无关** ——
+    /// 条子是素材入口，不是卡片列表（票 `07` 的回归判据）。
+    ///
+    /// 写成 `static let` 而不是每帧现算：`DisplayPlan` 每一帧都会建一次
+    /// （滚动、拖动都会触发重算），而它会遍历整个全集做查表。
+    static let panoramaAssets = PanoramaAssetCatalog.assets(in: items)
+
+    /// 全景项的 `id → 投影档`。注入给 `RemoteControl` 做输入分流
+    /// （见 `detailProjection` / `isPanoramaDetail`）。
+    ///
+    /// 从**全集**派生而不是从 `visibleItems`：筛选只改"幕墙上摆哪些"，
+    /// 不该让"正在看的那张全景图"因为切了筛选就忽然不再吃视角输入。
+    ///
+    /// 非 private：渲染侧在 `.onAppear` 才注入，而调试预置
+    /// （`MockRemoteState`）跑在那之前 —— 而 `openDetail` 的**入口朝向**
+    /// 要读这张表（票 `09`），所以预置必须先自己补一次。
+    /// 不补的后果是 `pano=8` 截出来 `yaw = 0°`（180° 线仍在正中），
+    /// 看上去像锚点又错了，实际上只是分流表还没注入。
+    static let panoramaItems: [Int: PanoramaProjection] = Dictionary(
+        uniqueKeysWithValues: items.compactMap { item in
+            item.projection.map { (item.id, $0) }
+        }
+    )
+
+    /// 幕墙上**实际摆放**的那些项 = 全集经当前筛选档过滤。
+    ///
+    /// 过滤是纯函数、保持原顺序（见 `PanoramaFilter.apply`），
+    /// 所以贪心分列的结果只随"还剩哪些项"变，不随筛选这个动作本身抖动。
+    private var visibleItems: [WaterfallItem] {
+        store.filter.apply(to: Self.items)
     }
 
     var body: some View {
         GeometryReader { geometry in
-            let plan = DisplayPlan(viewport: geometry.size)
+            let plan = DisplayPlan(
+                viewport: geometry.size,
+                items: visibleItems,
+                assets: Self.panoramaAssets
+            )
 
             ZStack(alignment: .topLeading) {
                 StarfieldBackdrop(
@@ -114,14 +139,7 @@ struct ExternalDisplayRootView: View {
                 )
 
                 if let item = detailItem {
-                    PhotoDetailView(
-                        item: item,
-                        viewport: plan.scroll.viewport,
-                        base: plan.base,
-                        mode: remote.detailMode,
-                        pan: remote.detailPan,
-                        onClampPan: { remote.setDetailPan($0) }
-                    )
+                    detailPage(item: item, plan: plan)
                 } else {
                     contentColumn(plan)
                 }
@@ -141,7 +159,13 @@ struct ExternalDisplayRootView: View {
             // 这与 `scrollColumn` 当年踩的是同一个坑（README 踩坑第 10 条）。
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             .clipped()
-            .onAppear { reportMetrics(geometry.size) }
+            .onAppear {
+                reportMetrics(geometry.size)
+                // 输入分流要用它（见 `RemoteControl.isPanoramaDetail`）。
+                // 只有渲染侧知道每张卡的投影，所以由这里注入一次 ——
+                // `items` 是 `static let`，注入一次即恒定，不存在同步问题。
+                remote.setPanoramaItems(Self.panoramaItems)
+            }
             .onChange(of: geometry.size) { _, size in reportMetrics(size) }
             // 挂在 GeometryReader **内部**：选中判定要问 `plan` 当前命中的是哪一张卡，
             // 而 `plan` 是这一层闭包里的局部值，外层拿不到。
@@ -165,6 +189,11 @@ struct ExternalDisplayRootView: View {
     /// 打包成一个值而不是散在 `body` 里逐层传参：布局有顺序依赖
     /// （先瀑布流分列 → 才有内容总高 → 才有可滚动距离），
     /// 集中在一处算能保证这个顺序不会被后续改动打乱。
+    ///
+    /// `items` 是**筛选后的可见集**（见 `visibleItems`），而 `detailItem` 与
+    /// `assets` 走全集 —— 两者刻意分开：筛选是"幕墙上摆哪些"，不是"哪些照片存在"，
+    /// 更不是"有哪些素材"。把 `assets` 也按可见集算的话，切一下「只看全景」
+    /// 条子就会少两条，而它明明是个**入口**、不该随幕墙的过滤变。
     private struct DisplayPlan {
 
         let base: CGFloat
@@ -172,34 +201,59 @@ struct ExternalDisplayRootView: View {
         let layout: WaterfallLayout
         let scroll: ScrollMetrics
         let lateral: LateralMetrics
-        let heroHeight: CGFloat
         let focus: WaterfallFocus
         let backButton: BackButtonGeometry
 
-        init(viewport: CGSize) {
+        /// 整条竖栈（hero / 条子 / 瀑布流）的位置与总高。
+        ///
+        /// 它是那条 `VStack(spacing: inset)` 的**唯一**来源，`verify` 脚本里
+        /// 那两处（§1 的可滚动判据、§10c 的优先级判据）也从同一个类型取 ——
+        /// 三处各写一份的话，往中间插一个块就会变成"断言测的是另一个布局"。
+        let stack: WallContentStack
+
+        /// 素材条的槽位几何（命中判定用）。`hero` 下面的第二块。
+        let strip: PanoramaStripGeometry
+
+        /// 条子上列出的素材。与 `items`（可见集）不同源，见类型文档。
+        let assets: [PanoramaAsset]
+
+        init(viewport: CGSize, items: [WaterfallItem], assets: [PanoramaAsset]) {
             let base = min(viewport.width, viewport.height)
             let waterfall = WaterfallMetrics(
                 base: base,
                 viewport: viewport,
                 columns: ExternalDisplayRootView.columnCount
             )
-            let layout = WaterfallLayout.make(items: ExternalDisplayRootView.items, metrics: waterfall)
-            let heroHeight = ExternalDisplayRootView.heroHeight(for: viewport, inset: waterfall.inset)
+            let layout = WaterfallLayout.make(items: items, metrics: waterfall)
+            let stack = WallContentStack(
+                viewport: viewport,
+                metrics: waterfall,
+                waterfallHeight: layout.contentHeight
+            )
 
             self.base = base
             self.waterfall = waterfall
             self.layout = layout
-            self.heroHeight = heroHeight
+            self.stack = stack
+            self.assets = assets
+            self.strip = PanoramaStripGeometry(
+                viewport: viewport,
+                fieldWidth: waterfall.columnFieldWidth,
+                base: base,
+                count: assets.count,
+                originY: stack.stripOriginY
+            )
             self.lateral = LateralMetrics(viewport: viewport)
-            // 内容总高 = hero + 间距 + 瀑布流。上下内边距由 ScrollMetrics 自己加。
+            // 内容总高由竖栈给出（口径：含块间间距、不含上下内边距）。
             self.scroll = ScrollMetrics(
                 viewport: viewport,
-                contentHeight: heroHeight + waterfall.inset + layout.contentHeight,
+                contentHeight: stack.contentHeight,
                 inset: waterfall.inset
             )
             // 列排布区左上角在容器里的位置：横向是排布区居中让出的那侧留白，
-            // 纵向是「上内边距 + hero + VStack 间距」——
-            // 与 `contentColumn` 里那个 VStack 的结构一一对应，改一边要改两边。
+            // 纵向是「上内边距 + hero + 间距 + 条子 + 间距」——
+            // 与 `contentColumn` 里那个 VStack 的结构一一对应，而两者都取自
+            // `stack`，所以不可能只改一边。
             //
             // 横向刻意用「视口宽 − 排布区宽」而不是 `horizontalInset`：视口窄到
             // 装不下两侧留白时 `columnFieldWidth` 会被 `max(0, _)` 护栏夹住，
@@ -207,7 +261,7 @@ struct ExternalDisplayRootView: View {
             self.focus = WaterfallFocus(
                 fieldOrigin: CGPoint(
                     x: (viewport.width - waterfall.columnFieldWidth) / 2,
-                    y: waterfall.inset * 2 + heroHeight
+                    y: stack.fieldOriginY
                 ),
                 placements: layout.placements
             )
@@ -301,6 +355,19 @@ struct ExternalDisplayRootView: View {
 
         return VStack(alignment: .leading, spacing: plan.waterfall.inset) {
             hero(plan)
+            // 素材条夹在 hero 与瀑布流之间 —— 这正是"瀑布流上方"的字面落点，
+            // 而它与 hero 同属内容列（随内容滚动、一起被推开），不做固定浮层：
+            // 常驻浮层是另一件事（它要在幕墙被推走时留在原位），得单独一票。
+            //
+            // ⚠️ 往这条 VStack 里插块，必须同时改 `WallContentStack` ——
+            // 那个类型是这三块位置的唯一来源，也是命中判定的纵向输入。
+            // 只改这里的表现是"指针点的永远偏一格"，而静止截图看着完全正常。
+            PanoramaStripView(
+                assets: plan.assets,
+                geometry: plan.strip,
+                focusedIndex: focusedStripIndex(in: plan),
+                selectedItemID: remote.selectedItemID
+            )
             WaterfallColumnView(
                 layout: plan.layout,
                 metrics: plan.waterfall,
@@ -359,7 +426,7 @@ struct ExternalDisplayRootView: View {
             }
             .padding(plan.base * 0.045)
         }
-        .frame(height: plan.heroHeight)
+        .frame(height: plan.stack.heroHeight)
         .clipShape(RoundedRectangle(cornerRadius: plan.base * 0.022, style: .continuous))
         // hero 的圆角是画面上的一个显式形状，被屏幕边缘切掉会看起来像布局错了，
         // 所以左右内边距由它自己补。取 `horizontalInset` —— 与瀑布流的左右边对齐。
@@ -669,9 +736,112 @@ struct ExternalDisplayRootView: View {
         return Self.items.first { $0.id == id }
     }
 
+    // MARK: - 详情页分流
+
+    /// 详情页：按投影档分叉成三支。
+    ///
+    /// ## 为什么分叉判据只有一个
+    /// `projection` 同时决定"画哪一种几何"与"输入送到哪个量"。做成两个开关
+    /// 迟早会不同步 —— 症状是"画的是全景、动的却是照片平移"，看起来像手势失灵。
+    ///
+    /// | 档 | 视图 | 几何 |
+    /// |---|---|---|
+    /// | `nil` 普通照片 | `PhotoDetailView` + 渐变 | 与改造前**逐点一致** |
+    /// | `.cylindrical` A 类 | `PhotoDetailView(.fill)` + 真实素材 | 不新增，横向由视角折出 |
+    /// | `.equirect` B/C 类 | `PanoramaDetailView` | 本线唯一的新几何 |
+    @ViewBuilder
+    private func detailPage(item: WaterfallItem, plan: DisplayPlan) -> some View {
+        switch item.projection {
+        case .equirect:
+            PanoramaDetailView(
+                item: item,
+                items: Self.items,
+                viewport: plan.scroll.viewport,
+                base: plan.base,
+                look: remote.panoramaLook,
+                fov: remote.panoramaFOV,
+                source: store.panoramaSource,
+                isAnimated: store.isAnimated,
+                phase: store.panoramaPhase,
+                raw: airMouse.latestReading,
+                onClampPitch: { remote.clampLookPitch(to: $0) }
+            )
+
+        case .cylindrical:
+            PhotoDetailView(
+                item: item,
+                viewport: plan.scroll.viewport,
+                base: plan.base,
+                // A 类恒铺满：它的正确几何就是"填满视口 + 左右可拖"。
+                // `fit` 模式下两个方向都没有超出量，横滑会直接失效 ——
+                // 而失效的表现是"拖了没反应"，不像几何错，更像手势坏了。
+                mode: .fill,
+                pan: cylindricalPan,
+                onClampPan: { pan in
+                    remote.setLook(PanoramaLook(yaw: CylindricalPan.yaw(forProgress: pan.width)))
+                },
+                image: cylindricalImage(for: item)
+            )
+
+        case nil:
+            PhotoDetailView(
+                item: item,
+                viewport: plan.scroll.viewport,
+                base: plan.base,
+                mode: remote.detailMode,
+                pan: remote.detailPan,
+                onClampPan: { remote.setDetailPan($0) }
+            )
+        }
+    }
+
+    /// A 类（柱面）的横向行程，由视角折出。
+    ///
+    /// 柱面**不新增几何** —— 它"填满 + 左右拖"的样子与 `PhotoDetailGeometry(.fill)`
+    /// 的 `fill + isWider` 那一组逐字重合（spec §4.2）。这里只把 yaw 映射成
+    /// 既有的那条 `pan.width`；垂直恒为 0，因为柱面扫掠没有俯仰。
+    private var cylindricalPan: CGSize {
+        CGSize(
+            width: CylindricalPan.progress(forYaw: remote.panoramaLook.signedYaw),
+            height: 0
+        )
+    }
+
+    /// A 类的真实素材。
+    ///
+    /// 只在帧源档为 `real` 时取（初值来自 `-panoramaAsset`，点素材条会把它切成
+    /// `real`）。其余三档对柱面**不成立** —— 经纬网是 equirect 的对照物、
+    /// 抽帧与动画纹理也都是等距柱状的，柱面没有对应的版本，
+    /// 所以它回落渐变，与改造前一模一样。判据收在
+    /// `PanoramaAssetSource.appliesToCylindrical`。
+    ///
+    /// 这一句在 `body` 每次求值时都会跑到（滚动、拖动都会触发重算），
+    /// 所以解码必须走带缓存的 `PanoramaImageStore`，不能在这里直接
+    /// `UIImage(contentsOfFile:)`。
+    private func cylindricalImage(for item: WaterfallItem) -> UIImage? {
+        guard store.panoramaSource.appliesToCylindrical else { return nil }
+        return PanoramaImageStore.image(for: item, in: Self.items)
+    }
+
     private func focusedItem(in plan: DisplayPlan) -> Int? {
         guard let pointer = remote.pointer else { return nil }
         return plan.focus.item(
+            at: point(pointer, in: plan),
+            contentOffset: contentOffset(in: plan)
+        )
+    }
+
+    /// 指针当前压在哪一条素材上。
+    ///
+    /// 与卡片命中同源：同一个指针落点、**同一个** `contentOffset`。
+    /// 条子在瀑布流上方，两者矩形不可能重叠，所以这里不必与 `focusedItem`
+    /// 排优先级 —— 只要位移喂的是同一个值就够。
+    ///
+    /// 详情页里恒返回 `nil`：那时内容列根本没画（`body` 走了另一支），
+    /// 但指针仍可能在屏上，不禁掉的话回墙之前那条会一直亮着环。
+    private func focusedStripIndex(in plan: DisplayPlan) -> Int? {
+        guard remote.detailItemID == nil, let pointer = remote.pointer else { return nil }
+        return plan.strip.index(
             at: point(pointer, in: plan),
             contentOffset: contentOffset(in: plan)
         )
@@ -689,7 +859,7 @@ struct ExternalDisplayRootView: View {
 
     /// 轻点 / 扳机（单击路径）。
     ///
-    /// 优先级：**返回按钮 > 详情页 > 卡片命中**。
+    /// 优先级：**返回按钮 > 详情页 > 素材条 > 卡片命中**。
     /// 按钮压在内容之上，指针在它里面的时候，底下的东西不该抢走这次点击；
     /// 它的判定区比卡片小得多，优先判它不会让卡片的命中变"粘"。
     private func handleTap(in plan: DisplayPlan) {
@@ -711,11 +881,58 @@ struct ExternalDisplayRootView: View {
         // 第二击再切模式 —— 用户看到的会是"退出又进去"，像失灵。
         guard remote.detailItemID == nil else { return }
 
+        // 素材条排在卡片之前判：条子是不随滚动重排的一排固定槽位，
+        // 命中区比卡片小得多，先判它不会让卡片的命中变"粘"。
+        if openStripAsset(in: plan) { return }
+
         openDetail(in: plan)
     }
 
-    /// 双击路径：切换查看模式（整图 ↔ 铺满）。不在详情页时 `RemoteControl` 会忽略。
+    /// 幕墙页的单击落在素材条上：直接进那条素材的全景页。
+    ///
+    /// - Returns: 是否命中条子（命中即已消费这次点击）。
+    ///
+    /// ## 为什么要点一下就把纹理档切到 `real`
+    /// `assetImage` 闸在 `panoramaSource == .real` 上，而默认档是 `.grid`。
+    /// 不切的话，用户点了一条**缩略图是真照片**的素材，进去看到的却是程序化网格 ——
+    /// 两张东西对不上，最自然的解读是"点错素材了"。
+    /// 一次点击之后整场都是 `.real`，这正是演示的意图；要回网格判读模式，
+    /// 重启用 `-panoramaAsset=grid`（截图判读路径不经过这里，所以那条纪律不受影响）。
+    ///
+    /// ## 为什么这里只写内容状态、不写视口状态
+    /// 它落在 `DisplayContentStore`（"看什么"）而不是 `RemoteControl`（"怎么看"）——
+    /// 与 `filter` 同一个归属。于是条子**不新增任何共享状态**：
+    /// "当前是哪一条"仍然是 `remote.selectedItemID`（`openDetail` 会写它），
+    /// 条子只是把那个已经存在的选择多给了一个入口。
+    private func openStripAsset(in plan: DisplayPlan) -> Bool {
+        guard let index = focusedStripIndex(in: plan), index < plan.assets.count else {
+            return false
+        }
+        store.panoramaSource = .real
+        remote.openDetail(item: plan.assets[index].itemID)
+        return true
+    }
+
+    /// 双击路径：**全景页 = 退出；其余详情页 = 切换查看模式（整图 ↔ 铺满）**。
+    ///
+    /// ## 为什么全景页的双击可以拿去当"退出"
+    /// 因为那个动作在全景页里**本来就没有含义**：`detailMode` 只被 `PhotoDetailView` 读，
+    /// 而两类全景页一个走 `PanoramaDetailView`（压根不看它）、另一个写死 `.fill`
+    /// （见 `detailPage`）—— 双击全景页改的是一个谁都不读的值，用户看不到任何变化。
+    /// 于是它是本项目里唯一一处"闲置手势"，拿来做退出不占别人的位置。
+    ///
+    /// ## 为什么必须是双击、不能顺手把单击也接上
+    /// 单击要给双击让路（见 `handleTap`）：单击一旦有了动作，双击的第一击就先生效，
+    /// 用户看到的会是"退出又进去"，像失灵。
+    ///
+    /// ## 为什么同时还要有遥控台的「返回」
+    /// 这个手势**不可见**（外接屏页脚那行字是唯一提示），而抱着手机转视角的人
+    /// 多半不会去眼镜屏角落读小字。两条路都直接调 `closeDetail()`，不冲突。
     private func handleDoubleTap() {
+        if remote.isPanoramaDetail {
+            remote.closeDetail()
+            return
+        }
         remote.toggleDetailMode()
     }
 

@@ -179,6 +179,42 @@ struct WaterfallColumnView: View {
                 .foregroundStyle(.white.opacity(0.5))
                 .padding(metrics.base * 0.022)
         }
+        // 角标**只对全景卡**生效：`projection` 为 `nil` 时整个 overlay 是空视图，
+        // 普通卡一个绘制指令都不多付（与焦点环"只画在命中的那一张上"同一条取舍）。
+        .overlay(alignment: .topTrailing) {
+            if let projection = item.projection {
+                panoramaBadge(projection)
+            }
+        }
+    }
+
+    /// 全景角标：一枚压在卡片右上角的小胶囊。
+    ///
+    /// ## 为什么两档给不同的图标与文案
+    /// 柱面与 equirect 在**详情页里是两种浏览方式**（横滑 vs 转头看四周），
+    /// 只在数据层区分、不在卡片上区分的话，用户点进去才知道是哪种 ——
+    /// 而这两种的交互预期完全不同（一种只能左右、一种上下也能）。
+    ///
+    /// 深底 + 白字是必须的：卡片封面是任意色相的渐变，纯白文字压上去
+    /// 在半数色相上会糊掉；垫一层恒定黑底之后对比度不再取决于卡片颜色。
+    private func panoramaBadge(_ projection: PanoramaProjection) -> some View {
+        let isEquirect = projection == .equirect
+
+        return HStack(spacing: metrics.base * 0.010) {
+            Image(systemName: isEquirect ? "globe" : "panorama")
+                .font(.system(size: metrics.base * 0.032, weight: .semibold))
+
+            Text(isEquirect ? "360°" : "全景")
+                .font(.system(size: metrics.base * 0.030, weight: .semibold, design: .rounded))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, metrics.base * 0.016)
+        .padding(.vertical, metrics.base * 0.008)
+        .background(.black.opacity(0.55), in: Capsule())
+        .overlay {
+            Capsule().stroke(.white.opacity(0.22), lineWidth: max(1, metrics.base * 0.002))
+        }
+        .padding(metrics.base * 0.022)
     }
 
     private func footer(_ item: WaterfallItem) -> some View {
@@ -228,7 +264,11 @@ struct WaterfallColumnView: View {
 ///
 /// 光晕用 `.shadow(radius:y: 0)` 而不是 `.blur`：前者作用在卡片**轮廓**上，
 /// 不会把卡片本身的内容（渐变封面、底栏文字）一起糊掉。
-private struct FocusGlow: ViewModifier {
+///
+/// 非 private：素材条（`PanoramaStripView`）用的是同一层光晕。整块屏上
+/// "红色 = 交互焦点"是同一套语言，两处各写一遍迟早会漂开 ——
+/// 症状是"卡片的选中态比素材条的浓"，看起来像两套设计混在一起。
+struct FocusGlow: ViewModifier {
 
     let isSelected: Bool
     let base: CGFloat
@@ -247,7 +287,9 @@ private struct FocusGlow: ViewModifier {
 
 /// 焦点环的几何常量。颜色刻意不放在这里 —— 它们来自 `LaserPalette`，
 /// 与外接屏上的光标共用同一套配色，见 `focusRing`。
-private enum FocusPalette {
+///
+/// 非 private：素材条与卡片共用同一组比例，见 `FocusGlow` 的说明。
+enum FocusPalette {
 
     /// 环与卡片之间的空隙。
     ///

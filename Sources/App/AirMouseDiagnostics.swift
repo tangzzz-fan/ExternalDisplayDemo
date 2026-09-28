@@ -48,8 +48,8 @@ struct AirMouseDiagnostics: View {
                     .foregroundStyle(.red)
             }
 
-            if airMouse.warmup.isSynthetic {
-                Text("当前是 `-mockAirMouse` 合成数据源：只驱动激光指针，下面的预热指标全部无真实读数。要让这些数字有意义，必须在有陀螺仪的真机上跑。")
+            if let synthetic = airMouse.syntheticSourceNote {
+                Text("当前是 `\(synthetic.name)` 合成数据源：驱动\(synthetic.target)，下面的预热指标全部无真实读数。要让这些数字有意义，必须在有陀螺仪的真机上跑。")
                     .font(.footnote)
                     .foregroundStyle(.orange)
             }

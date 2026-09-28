@@ -42,9 +42,23 @@ struct ExternalDisplayDemoApp: App {
                     // 逐状态截图核对下拉几何。无参数时是 no-op。
                     MockRemoteState.applyIfNeeded()
 
+                    // 全景纹理档的**初值**。此后它由素材条的点击改写
+                    // （见 `DisplayContentStore.panoramaSource`）——
+                    // 所以这里写一次就够，不必每帧比。
+                    //
+                    // 放在 `applyIfNeeded` **之后**：那个函数会处理
+                    // `-remoteState` 里的内容类键（`filter`），
+                    // 两条路都写 `DisplayContentStore`，先后只影响"同一帧内谁后落地"，
+                    // 而它们写的是不同的属性，顺序上不敏感 —— 排在这里只是读起来顺
+                    // （先视口、后内容）。
+                    DisplayContentStore.shared.panoramaSource = MockPanoramaAsset.source
+
                     // 与 `-mockExternalDisplay` 同一约定：带了 mock 参数就直接进入该模式，
                     // 否则这个参数要用户手动点开遥控台 → 切到空鼠 → 点启动才生效。
-                    if MockAirMouseSource.isEnabled {
+                    //
+                    // `-mockAirMouse`（喂激光指针）与 `-mockLook`（喂全景视角）都要起 ——
+                    // 起哪一条由 `AirMouse.start()` 内部按参数分流，这里只负责"要不要起"。
+                    if MockAirMouseSource.isEnabled || MockLookSource.isEnabled {
                         AirMouse.shared.start()
                     }
                 }

@@ -120,7 +120,7 @@ final class MockExternalDisplay {
         let container = windowScene.coordinateSpace.bounds
         guard container.width > 0, container.height > 0 else { return }
 
-        let aspect = Self.parseAspect() ?? 16.0 / 9.0
+        let aspect = Self.aspectRatio
         let rect = Self.letterboxedRect(
             in: container.insetBy(dx: 20, dy: 60),
             aspect: aspect,
@@ -177,6 +177,14 @@ final class MockExternalDisplay {
             return CGRect(x: available.minX, y: available.midY - height / 2, width: available.width, height: height)
         }
     }
+
+    /// 替身窗口假装的宽高比。缺省 `16:9`。
+    ///
+    /// 非 private：调试预置 `-remoteState strip=<index>` 要用它把素材条的槽心
+    /// 换算成**归一化**落点。那个落点只与宽高比有关
+    /// （见 `PanoramaStripGeometry.normalizedSlotCenter`），所以预置不需要知道
+    /// 替身窗口有多少点 —— 但它必须拿到**同一个**宽高比，否则指针会压到隔壁那条上。
+    static var aspectRatio: CGFloat { parseAspect() ?? 16.0 / 9.0 }
 
     /// 支持 `-mockExternalDisplayAspect=4:3` 与 `-mockExternalDisplayAspect 4:3` 两种写法。
     private static func parseAspect() -> CGFloat? {

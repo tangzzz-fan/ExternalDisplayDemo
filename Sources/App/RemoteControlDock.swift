@@ -39,6 +39,10 @@ struct RemoteControlDock: View {
     private let remote = RemoteControl.shared
     private let airMouse = AirMouse.shared
 
+    /// 内容筛选档的宿主。`@Bindable` 是 `@Observable` 类型取值绑定的方式 ——
+    /// 本类只管"怎么看"，筛选那一位在 `DisplayContentStore`（"显示什么"）。
+    @Bindable private var store = DisplayContentStore.shared
+
     @State private var isExpanded = false
     @State private var mode: ControlMode = .trackpad
 
@@ -154,6 +158,10 @@ struct RemoteControlDock: View {
 
     private var controls: some View {
         VStack(spacing: 12) {
+            // 先选"看什么"，再选"怎么看"。放最上面是因为它是这次操作里
+            // 更粗的一层粒度：切到「只看全景」之后，幕墙上换的是整片内容。
+            contentFilterPicker
+
             Picker("输入方式", selection: $mode) {
                 ForEach(ControlMode.allCases) { mode in
                     Text(mode.title).tag(mode)
@@ -171,6 +179,28 @@ struct RemoteControlDock: View {
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 10)
+    }
+
+    /// 内容筛选档。
+    private var contentFilterPicker: some View {
+        Picker("内容", selection: $store.filter) {
+            ForEach(PanoramaFilter.allCases) { filter in
+                Text(title(for: filter)).tag(filter)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    /// 筛选档的文案。
+    ///
+    /// 刻意留在视图层：`PanoramaFilter` 与 `WaterfallItem` 一样是纯值类型，
+    /// 不该认识字符串（否则"换个说法"要改数据层，也让断言没法只测档位映射）。
+    private func title(for filter: PanoramaFilter) -> String {
+        switch filter {
+        case .all: "全部"
+        case .panoramaOnly: "只看全景"
+        }
     }
 }
 

@@ -142,6 +142,39 @@ final class RemoteControl {
     /// 却把幕墙滚走了"，看起来像手势错乱。
     private(set) var detailItemID: Int?
 
+    /// 全景项的 `id → 投影档`。**由渲染侧注入** —— 只有它知道每张卡的 `projection`。
+    ///
+    /// 这不是一份"新状态"而是**派生数据**：真实来源是 `WaterfallItem.demoItems`，
+    /// 一个 `static let`，注入一次即恒定。之所以要让本类拿到它：
+    /// 输入分流（`scroll(by:)` / `lateral(by:)` / `AirMouse`）全在本层，
+    /// 而它们只看得到 `detailItemID`，看不见卡片的投影。
+    ///
+    /// 存**档位**而不只是一个 id 集合，是因为两类全景吃的输入本来就不一样：
+    /// 柱面没有俯仰（见 `scroll(by:)`），球面两个轴都吃。
+    /// 只存一个集合的话，"A 类纵向拖动"会悄悄改一个它根本不读的角度 ——
+    /// 画面纹丝不动，而那个角度会一直留着。
+    private var panoramaItems: [Int: PanoramaProjection] = [:]
+
+    /// 注入 `id → 投影档`。渲染侧在挂载时调一次。
+    func setPanoramaItems(_ items: [Int: PanoramaProjection]) {
+        guard panoramaItems != items else { return }
+        panoramaItems = items
+    }
+
+    /// 当前详情页的投影档（`nil` = 不在详情页，或者那是一张普通照片）。
+    ///
+    /// 它与 `detailPage` 的分叉取自**同一个来源**（卡片自己的 `projection`），
+    /// 所以"画的是全景、动的却是照片平移"这种错位不可能发生。
+    /// 刻意不做成第二个开关：两个来源描述同一件事，迟早会有一处忘了同步，
+    /// 而症状是"手势失灵"，查起来会往手势层跑偏。
+    var detailProjection: PanoramaProjection? {
+        guard let id = detailItemID else { return nil }
+        return panoramaItems[id]
+    }
+
+    /// 当前详情页是不是全景页 —— 输入分流的判据。
+    var isPanoramaDetail: Bool { detailProjection != nil }
+
     /// 详情页的查看模式：整图（默认）或铺满。
     private(set) var detailMode: PhotoViewMode = .fit
 
@@ -166,11 +199,23 @@ final class RemoteControl {
     private var tapSequence = TapSequence()
 
     /// 进入某张照片的详情页。
+    ///
+    /// 会**重置视角**：换一张照片之后旧的朝向没有意义（新照片的 0° 与旧的
+    /// 0° 不是同一个方向）。这条重置有一个可观测的后果 ——
+    /// 启动参数里 `look=` 必须排在 `pano=`/`detail=` **之后**，否则会被这一行抹掉
+    /// （与 `bottom` 必须排在 `scroll` 之后是同一种次序问题）。
+    ///
+    /// 重置到的是**该投影的正前方**而不是 `PanoramaLook.zero` —— 见 `frontLook(for:)`。
     func openDetail(item id: Int) {
         select(item: id)
         detailItemID = id
         detailMode = .fit
         detailPan = .zero
+        panoramaLook = Self.frontLook(for: panoramaItems[id])
+        // 全景页里姿态归视角（见 `AirMouse` 的分流），激光让位 ——
+        // 上一次留下的落点会变成一枚钉死在全景页上的激光点，动不了也点不掉。
+        // 清掉之后，用户一转头它自然会重新出现（如果那时还在指针模式）。
+        if panoramaItems[id] != nil { pointer = nil }
         lastEvent = "查看第 \(id) 张"
     }
 
@@ -183,6 +228,7 @@ final class RemoteControl {
         detailItemID = nil
         detailMode = .fit
         detailPan = .zero
+        panoramaLook = .zero
         lastEvent = "返回幕墙"
     }
 
@@ -214,6 +260,129 @@ final class RemoteControl {
         )
     }
 
+    // MARK: - 全景详情页的视角
+
+    /// 全景详情页的视角。
+    ///
+    /// ## 为什么归这里
+    /// 与 `detailPan` 同一条理由：手机端不知道外接屏多大，更不该知道 `fov`
+    /// 与视口比例 —— 它只送"转过了多少"，几何全在渲染侧。
+    /// 而"当前在哪一页"（`detailItemID`）与"这一页的视角"本来是一件事的两面，
+    /// 拆到两个对象里就多出一处要手动同步的状态。
+    ///
+    /// ## 它与激光指针**物理互斥**
+    /// 全景页里手机姿态喂视角、不喂激光（spec §4.3-3，已标为行为变更）：
+    /// 一份物理姿态不可能同时干两件事。分流点在输入层（`AirMouse`），
+    /// 本类只提供量 —— 它不认识 `CMDeviceMotion`。
+    ///
+    /// ## `pitch` 的权威在渲染侧
+    /// 与 `detailPan` 同一条纪律：Core 层只做 ±90 的护栏（见 `PanoramaLook`），
+    /// 真正可达的范围取决于视口与 `fov`，只有渲染侧算得出 ——
+    /// 所以它每帧夹一次再回写（`clampLookPitch(to:)`），与 `setDetailPan` 并列。
+    private(set) var panoramaLook: PanoramaLook = .zero
+
+    /// 直接落到某个视角，供调试预置使用。
+    func setLook(_ look: PanoramaLook) {
+        panoramaLook = look
+        guard detailItemID != nil else { return }
+        lastEvent = String(format: "视角 yaw %.0f° · pitch %.0f°", look.yaw, look.pitch)
+    }
+
+    /// 按两帧**姿态读数**推进视角。输入层（`AirMouse`）逐帧调用。
+    ///
+    /// 与 `setLook` 的分工：那个是"落到某个值"（调试预置，会写 `lastEvent`），
+    /// 这个只改量 —— 姿态是 60 Hz 的连续流，逐帧刷文案既无意义，
+    /// 又会带着观察它的界面一起重算（与 `movePointer` 不写 `lastEvent` 同一条规矩）。
+    ///
+    /// 三个分量各自怎么用（横向累积、竖向绝对、roll 也走横向）收在
+    /// `PanoramaLook.advanced(from:to:)`，本方法只做那一道页面判定 ——
+    /// 两份实现迟早会漂开，而症状是"某个方向莫名不动"（票 `08`）。
+    func advanceLook(from previous: AttitudeReading, to current: AttitudeReading) {
+        guard detailItemID != nil else { return }
+        panoramaLook = panoramaLook.advanced(from: previous, to: current)
+    }
+
+    /// 由渲染侧回写夹取后的 pitch（见 `PanoramaLook.clamped(toPitchLimit:)`）。
+    ///
+    /// 夹取幂等 ⇒ 不形成更新循环；这与 `setDetailPan` 是同一条纪律，
+    /// 也是本类第三条「外接屏 → 模型」的写入。
+    func clampLookPitch(to limit: CGFloat) {
+        let clamped = panoramaLook.clamped(toPitchLimit: limit)
+        guard clamped != panoramaLook else { return }
+        panoramaLook = clamped
+    }
+
+    /// 视角归零 —— 把当前朝向定为新的"正前方"。
+    ///
+    /// 视角是**累积量**（逐帧最短弧增量累加，见 `PanoramaLook`），
+    /// 所以漂移会攒；这是本线唯一的手动纠偏手段。
+    ///
+    /// 归到 `frontLook(for:)` 而不是 `PanoramaLook.zero`：归零的语义本来就是
+    /// "回到正前方"，而正前方由投影档决定（见 `frontLook(for:)`）。
+    /// 退回 0 会让 equirect 归零后正对 0° 经线 —— 那是贴图的接缝。
+    func recenterLook() {
+        let target = Self.frontLook(for: detailProjection)
+        guard panoramaLook != target else { return }
+        panoramaLook = target
+        lastEvent = "视角归零"
+    }
+
+    /// 某个投影档的"正前方"。
+    ///
+    /// 两类全景的正面**落在不同的数上**：equirect 是 180°（等距柱状把相机的
+    /// 正前方缝在贴图水平中点，而 0° 是接缝），柱面是 0°（`CylindricalPan` 的居中口径）。
+    /// 依据收在 `PanoramaProjection.frontYaw`，这里只负责翻档。
+    ///
+    /// 「进页面」与「视角归零」共用它，是因为它们问的是同一件事 ——
+    /// 正前方只有一个，两处各写一套迟早会漂开。
+    private static func frontLook(for projection: PanoramaProjection?) -> PanoramaLook {
+        guard let projection else { return .zero }
+        return PanoramaLook(yaw: projection.frontYaw)
+    }
+
+    // MARK: - 全景页的视场
+
+    /// 全景页的视场（度）。
+    ///
+    /// ## 为什么归"怎么看"这半边
+    /// 它改的是"这一窗看到多少"，与"看哪一张"无关 —— 与 `panoramaLook` / `detailPan`
+    /// 同属视口状态，所以和它们放在一起（`filter` / `panoramaSource` 改的是显示什么，
+    /// 在 `DisplayContentStore`）。
+    ///
+    /// ## 为什么是档位而不是无级滑杆
+    /// 有档位，"这一窗宽多少度"才有确定说法，也才说得清"转 90° 换几屏"
+    /// （档位表在纯层：`EquirectProjection.fovStops`）。本类只存**当前值**，
+    /// 且恒等于表里的某一项 —— 由 `setPanoramaFOV` 折到最近档位保证。
+    ///
+    /// ## 只有 equirect 读它
+    /// 柱面（A 类）走 `PhotoDetailGeometry(.fill)`，压根没有视场这个概念
+    /// （见 `ExternalDisplayRootView.detailPage(item:plan:)` 的分流）。
+    ///
+    /// 复位（`reset()`）**刻意不动**它：它是观看偏好，与"把画面挪回初始位置"
+    /// 不是一回事；清掉会让每次截图都要重新选一遍档位。
+    private(set) var panoramaFOV: CGFloat = EquirectProjection.defaultFOV
+
+    /// 落到某个视场。入参不在档位表里时折到最近的一档。
+    func setPanoramaFOV(_ fov: CGFloat) {
+        let snapped = EquirectProjection.nearestFOV(to: fov)
+        guard snapped != panoramaFOV else { return }
+        panoramaFOV = snapped
+        lastEvent = "视场 \(Int(snapped))°"
+    }
+
+    /// 在档位表上前后挪一格，越界回绕。
+    ///
+    /// 与 `setPanoramaFOV` 并存而不是只留一个：档位是**有序**的（60/90/120），
+    /// "再宽一点"这个意图天然是相对量，而且在真机上按一下比在分段控件上瞄准一格容易。
+    func stepPanoramaFOV(by step: Int) {
+        let stops = EquirectProjection.fovStops
+        guard !stops.isEmpty else { return }
+        let current = stops.firstIndex(of: panoramaFOV) ?? 0
+        let count = stops.count
+        let next = ((current + step) % count + count) % count
+        setPanoramaFOV(stops[next])
+    }
+
     // MARK: - 文案与初始化
 
     /// 最近一次离散手势的说明，手机端面板上直读。
@@ -228,15 +397,32 @@ final class RemoteControl {
     /// 方向约定跟手指走：手指上滑 `dy < 0` → 内容上移 → 进度增大。
     /// 越过顶部后自动转成下拉、越过底部后自动转成上拉，调用方不需要自己判断边界。
     ///
-    /// ## 在详情页里它改的是照片平移
-    /// 同一个手指动作落到哪个量上，取决于当前在哪一页。分流点选在这里
-    /// 而不是手势层：手势层（`PadGesture`）是纯状态机，它不认识页面；
-    /// 渲染层则是纯输出，不该持有可写状态。本类本来就是"所有输入的汇聚点"，
-    /// 由它按页面决定去向，调用方一行都不用改。
+    /// ## 同一个动作落到哪个量上，取决于当前在哪一页
+    /// | 页 | 纵向拖动改的是 |
+    /// |---|---|
+    /// | 幕墙 | 滚动 / 下拉 / 上拉（`position`） |
+    /// | 照片详情 | 照片的纵向平移（`detailPan`） |
+    /// | **全景详情** | **视角的俯仰（`panoramaLook.pitch`）** |
+    ///
+    /// 分流点选在这里而不是手势层：手势层（`PadGesture`）是纯状态机，
+    /// 它不认识页面；渲染层则是纯输出，不该持有可写状态。
+    /// 本类本来就是"所有输入的汇聚点"，由它按页面决定去向，
+    /// 调用方（`GesturePad` / `AirMousePad`）一行都不用改。
     func scroll(by dy: CGFloat) {
         guard dy != 0 else { return }
 
         if detailItemID != nil {
+            // 只有**球面**吃俯仰。柱面（A 类）的垂直行程恒为 0
+            // （`cylindricalPan.height` 固定 0，见 `ExternalDisplayRootView`），
+            // 让它也走这条分支的话，纵向拖动会改一个它根本不读的角度 ——
+            // 画面纹丝不动，而那个角度会一直留着。
+            if detailProjection == .equirect {
+                panoramaLook = panoramaLook.advanced(
+                    deltaYaw: 0,
+                    deltaPitch: LookInput.pitchDelta(forScroll: dy)
+                )
+                return
+            }
             panDetail(by: CGSize(width: 0, height: dy))
             return
         }
@@ -302,8 +488,17 @@ final class RemoteControl {
     func lateral(by dx: CGFloat) {
         guard dx != 0 else { return }
 
-        // 与 `scroll(by:)` 同一条分流规则：详情页里它推的是照片。
+        // 与 `scroll(by:)` 同一条分流规则，只是落在另一条轴上：
+        // 幕墙推星海 / 照片推照片 / 全景转 yaw。
+        // 横向两类全景都吃：A 类的真实几何正是"横向由视角折出"（`cylindricalPan`）。
         if detailItemID != nil {
+            if isPanoramaDetail {
+                panoramaLook = panoramaLook.advanced(
+                    deltaYaw: LookInput.yawDelta(forLateral: dx),
+                    deltaPitch: 0
+                )
+                return
+            }
             panDetail(by: CGSize(width: dx, height: 0))
             return
         }
@@ -408,6 +603,7 @@ final class RemoteControl {
         detailItemID = nil
         detailMode = .fit
         detailPan = .zero
+        panoramaLook = .zero
         tapSequence = TapSequence()
         lastEvent = "已复位"
     }

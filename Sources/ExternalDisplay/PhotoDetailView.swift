@@ -40,10 +40,34 @@ struct PhotoDetailView: View {
     /// 把夹取后的行程回写给共享状态。
     let onClampPan: (CGSize) -> Void
 
+    /// 真实图片。
+    ///
+    /// `nil` 时回落渐变 —— 工程里的普通照片本来就是渐变占位（与瀑布流卡片同一口径），
+    /// 所以 `nil` 是**默认**，不是异常状态。
+    ///
+    /// 有图时几何按**图片自己的**宽高比算，而不是 `item.aspectRatio`：
+    /// 两者只在"卡片的随机比例恰好等于素材比例"时才相等，而 A 类柱面素材是
+    /// 3:1 ~ 4:1、卡片的随机比例可能是 4:3 —— 拿卡片比例去铺，会把一张
+    /// 柱面扫掠图拉伸成另一个形状，而这看起来只是"图有点怪"，不会报错。
+    ///
+    /// ## 为什么是 `var` 而不是 `let`
+    /// 带初始值的 **`let`** 存储属性不会进合成的逐成员初始化器 ——
+    /// 它已经有值、又不可变，列进参数表没有意义。于是调用点写 `image:` 会被
+    /// 判成多余参数（"extra argument 'image' in call"），而那一行看起来完全正常。
+    /// `var` + 默认值才会既出现在参数表里、又可以省略。
+    /// 同工程里的先例是 `ExternalDisplayRootView.onMetricsChange`。
+    var image: UIImage? = nil
+
+    /// 实际参与布局的宽高比：有图以图为准，无图用卡片的比例档位。
+    private var effectiveAspectRatio: CGFloat {
+        guard let image, image.size.height > 0 else { return item.aspectRatio }
+        return image.size.width / image.size.height
+    }
+
     var body: some View {
         let geometry = PhotoDetailGeometry(
             viewport: viewport,
-            aspectRatio: item.aspectRatio,
+            aspectRatio: effectiveAspectRatio,
             mode: mode
         )
 
@@ -75,8 +99,14 @@ struct PhotoDetailView: View {
         // type-check this expression in reasonable time"，甚至
         // "failed to produce diagnostic"。分段之后每段只剩一种解。
         let stack: some View = ZStack {
-            gradient
-            glow(size: size)
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.medium)
+            } else {
+                gradient
+                glow(size: size)
+            }
             caption
         }
         .frame(width: size.width, height: size.height)
@@ -174,7 +204,7 @@ struct PhotoDetailView: View {
     }
 
     private var ratioText: String {
-        switch item.aspectRatio {
+        switch effectiveAspectRatio {
         case 9.0 / 16: return "9:16"
         case 2.0 / 3: return "2:3"
         case 3.0 / 4: return "3:4"

@@ -75,6 +75,18 @@ struct WaterfallItem: Identifiable, Equatable, Sendable {
     /// 一成左右的卡片"跳出来"能打断整片均匀的色块节奏，
     /// 让眼睛有落点 —— 全是同等强度的卡片时，视线会直接滑出画面。
     let isFeatured: Bool
+
+    /// 全景投影档位；`nil` 表示普通照片。
+    ///
+    /// ## 为什么它是 `nil`-able 而不是加一个 `.none` 档
+    /// 「不是全景」是**没有这个属性**，不是"全景的一种"。
+    /// 用可选值之后，角标只需判 `if let`、筛选只需判 `!= nil`、
+    /// 详情页路由只需判 `== .equirect` —— 三处都不必认识第三个枚举成员，
+    /// 也就不会有"新增一档忘了在三处都处理"的漏。
+    ///
+    /// 接入真实相册后这一位由资源元数据给出（`mediaSubtypes` 含 `photoPanorama`
+    /// 之类的判据），当前由 `PanoramaProjection.tier(forRoll:)` 生成。
+    let projection: PanoramaProjection?
 }
 
 /// 瀑布流的几何常量。
@@ -317,9 +329,17 @@ extension WaterfallItem {
         var generator = SeededGenerator(seed: seed)
         // 照片自身属性（宽高比）走**独立**的随机源。见 `make(id:using:photo:)`。
         var photoGenerator = SeededGenerator(seed: seed &+ Self.photoSeedSalt)
+        // 投影标记同理，走**第三条**独立序列。理由与照片序列完全一样：
+        // 塞进任何一条既有序列，都会让那条序列从第 2 张起整片顺移。
+        var projectionGenerator = SeededGenerator(seed: seed &+ Self.projectionSeedSalt)
 
         return (1...count).map { index in
-            make(id: index, using: &generator, photo: &photoGenerator)
+            make(
+                id: index,
+                using: &generator,
+                photo: &photoGenerator,
+                projection: &projectionGenerator
+            )
         }
     }
 
@@ -329,6 +349,21 @@ extension WaterfallItem {
     /// 取一个"看起来不像随手写"的常数，是为了将来有人调主种子时不会
     /// 顺手把它也改成同一个数（那样两条序列会同步，等于没分开）。
     private static let photoSeedSalt: UInt64 = 0x9E37_79B9_7F4A_7C15
+
+    /// 投影标记随机源的种子偏移量。
+    ///
+    /// 与 `photoSeedSalt` 同理，且**彼此也不同** —— 否则投影与照片比例会同步，
+    /// 表现为"凡是横构图就一定是全景"这种不该出现的相关性。
+    ///
+    /// ## 这个具体数值不是随手挑的
+    /// 取 SplitMix64 的标准增量常量。它在 36 张演示集上给出 **3 张柱面 + 3 张 equirect** ——
+    /// 恰好满足截图矩阵"要有 equirect 能点进去"这个硬需求。
+    ///
+    /// 第一版取的是 `0xD1B5_4A32_D192_ED03`，实测那一条序列在 36 张里
+    /// **一张 equirect 都不出**（8% 的期望是 2.9 张，抽到 0 完全可能）——
+    /// 而症状是"截图矩阵里没有全景详情页可截"，与"投影功能没做完"看起来一模一样。
+    /// 换盐比调分布干净：分布口径（0.80 / 0.92）是拍板过的，不该为了凑样本去动它。
+    private static let projectionSeedSalt: UInt64 = 0x2545_F491_4F6C_DD1D
 
     /// 抽一张卡。
     ///
@@ -345,10 +380,15 @@ extension WaterfallItem {
     ///
     /// 分开之后，主序列的消耗与改动前**逐个相同**，`.scratch/shots/` 里
     /// 逐状态截图的基线继续有效。
-    private static func make<G: RandomNumberGenerator, P: RandomNumberGenerator>(
+    ///
+    /// 全景投影标记是**第三条**序列（`projectionSeedSalt`），同一条理由：
+    /// 它一旦并进上面任何一条（哪怕"只加在末尾"），那条序列的后续卡片
+    /// 照样整片顺移，只是**顺移的是别人**。
+    private static func make<G: RandomNumberGenerator, P: RandomNumberGenerator, Q: RandomNumberGenerator>(
         id: Int,
         using generator: inout G,
-        photo photoGenerator: inout P
+        photo photoGenerator: inout P,
+        projection projectionGenerator: inout Q
     ) -> WaterfallItem {
         // 长条：22% 的卡片额外加 0...0.85 的权重，把少数卡片拉到 2.75 上限。
         // 在这个量级上，最高的那些卡会从"横条"变成"竖条"（高度超过列宽），
@@ -373,6 +413,9 @@ extension WaterfallItem {
         // 照片自身的形状来自另一条序列：它不影响主序列的消耗。
         let aspectRatio = photoAspectRatio(forRoll: roll(&photoGenerator))
 
+        // 投影标记来自**第三条**序列，与上面两条都不相干。
+        let projection = PanoramaProjection.tier(forRoll: roll(&projectionGenerator))
+
         return WaterfallItem(
             id: id,
             heightWeight: heightWeight,
@@ -382,7 +425,8 @@ extension WaterfallItem {
             gradientAngle: angle,
             highlight: highlight,
             captionIndex: captionIndex,
-            isFeatured: isFeatured
+            isFeatured: isFeatured,
+            projection: projection
         )
     }
 
