@@ -4,7 +4,10 @@
 > `Sources/ExternalDisplay/DisplayScrollGeometry.swift`、`Sources/App/GesturePad.swift`、
 > `Sources/App/TouchSurface.swift`
 >
-> 相关章节：README 第四节（交互：外接屏收不到触摸）、第九节（瀑布流 + 下拉露背景墙）
+> 相关章节：README 第四节（交互：外接屏收不到触摸）
+>
+> ⚠️ 文中举例用的「幕墙 / 瀑布流」已随 2026-10-22 的业务清理删除（见 `docs/legacy/`）——
+> 举例描述的那条**手感链路本身仍然有效**，现在的落点是一块可滚动的图案画布。
 
 ## TL;DR
 

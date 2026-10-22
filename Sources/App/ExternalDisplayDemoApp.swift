@@ -12,7 +12,7 @@ import SwiftUI
 ///   带上会与 SwiftUI 自己装的 scene delegate 冲突。
 ///   真正必需的是 external role 那条 —— iOS 17~26「plist 自动连接外接屏」的唯一声明处；
 ///   iOS 27 起那条路失效、改由 scene accessory 负责（见 `ExternalDisplayAccessory`）。
-///   完整实测过程与对照表见 README 第八节；
+///   完整实测过程与对照表见 README 第六节；
 /// - 原来由 `MainSceneDelegate` 干的杂活（起模拟外接屏替身）不需要宿主 VC 了：
 ///   替身自己从 `UIApplication` 查主屏 scene，外接屏的 scene accessory 也改到
 ///   SwiftUI 里声明（`.externalDisplaySceneAccessory()`）。
@@ -41,26 +41,6 @@ struct ExternalDisplayDemoApp: App {
                     // `simctl` 没有触摸注入 API，没有这一步就没法脚本化地
                     // 逐状态截图核对下拉几何。无参数时是 no-op。
                     MockRemoteState.applyIfNeeded()
-
-                    // 全景纹理档的**初值**。此后它由素材条的点击改写
-                    // （见 `DisplayContentStore.panoramaSource`）——
-                    // 所以这里写一次就够，不必每帧比。
-                    //
-                    // 放在 `applyIfNeeded` **之后**：那个函数会处理
-                    // `-remoteState` 里的内容类键（`filter`），
-                    // 两条路都写 `DisplayContentStore`，先后只影响"同一帧内谁后落地"，
-                    // 而它们写的是不同的属性，顺序上不敏感 —— 排在这里只是读起来顺
-                    // （先视口、后内容）。
-                    DisplayContentStore.shared.panoramaSource = MockPanoramaAsset.source
-
-                    // 与 `-mockExternalDisplay` 同一约定：带了 mock 参数就直接进入该模式，
-                    // 否则这个参数要用户手动点开遥控台 → 切到空鼠 → 点启动才生效。
-                    //
-                    // `-mockAirMouse`（喂激光指针）与 `-mockLook`（喂全景视角）都要起 ——
-                    // 起哪一条由 `AirMouse.start()` 内部按参数分流，这里只负责"要不要起"。
-                    if MockAirMouseSource.isEnabled || MockLookSource.isEnabled {
-                        AirMouse.shared.start()
-                    }
                 }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -72,10 +52,6 @@ struct ExternalDisplayDemoApp: App {
                 // SwiftUI 没有 `sceneDidDisconnect` 的等价物，用进后台近似。
                 // 真实项目若有必须在 scene 断开时释放的资源，这里要另行设计。
                 MockExternalDisplay.shared.reset()
-
-                // 空鼠必须在这里停：CoreMotion 的数据流在后台会继续跑并持续耗电，
-                // 而"瞄准"这件事只在应用可见时才有意义 —— 没人看着的屏幕不需要指针。
-                AirMouse.shared.stop()
             default:
                 break
             }

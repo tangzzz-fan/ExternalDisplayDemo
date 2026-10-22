@@ -11,7 +11,7 @@ import UIKit
 /// 的 `ExternalDisplayRootView`，并把自己登记成一个 `source == .mock` 的 attachment。
 ///
 /// 这层只在 `-mockExternalDisplay` 启动参数存在时生效，完全不参与真机链路；
-/// 手机端界面里会多出一个开关，方便随时收起它去做表单操作。
+/// 手机端状态栏右侧会多出一个按钮，方便随时把它收起来。
 ///
 /// 它需要主屏的 `UIWindowScene`（替身窗口要挂上去），而 SwiftUI 没有对应的环境值 ——
 /// 但 `UIApplication.shared.connectedScenes` 随时可查，所以不需要为此在视图树里
@@ -27,7 +27,7 @@ final class MockExternalDisplay {
         ProcessInfo.processInfo.arguments.contains("-mockExternalDisplay")
     }
 
-    /// 绑定到手机端的调试开关；置 true 即挂载模拟外接屏，置 false 即收起。
+    /// 绑定到手机端的开关；置 true 即挂载模拟外接屏，置 false 即收起。
     var isVisible: Bool = false {
         didSet {
             guard oldValue != isVisible else { return }
@@ -41,24 +41,7 @@ final class MockExternalDisplay {
     /// 替身窗口假装的屏幕缩放比（模拟一块 3x 的外接屏）。
     private static let scale: CGFloat = 3
 
-    /// 底部常驻遥控台**实际**占用的高度（点）。
-    ///
-    /// 由 `RemoteControlDock` 自己上报，而不是写死一个常数。
-    /// 遥控台收起时只有一条读数栏（约 50pt），展开后是三四百点，
-    /// 而且**空鼠栏比触控板栏还高**（多一块手势面）—— 任何写死的值都必然过时：
-    /// 这个数曾经是 96，空鼠栏加上手势面之后「触控板 / 空鼠」切换器就被窗口盖住了。
-    @ObservationIgnored private(set) var dockHeight: CGFloat = 96
-
     private init() {}
-
-    /// 遥控台上报自身高度。高度变化会重新摆放替身窗口。
-    ///
-    /// 高度在**点**上，与 `windowScene.coordinateSpace.bounds` 同一坐标系，可以直接比。
-    func reserveBottom(_ height: CGFloat) {
-        guard height > 0, abs(height - dockHeight) > 0.5 else { return }
-        dockHeight = height
-        layout()
-    }
 
     // MARK: - Lifecycle
 
@@ -111,20 +94,15 @@ final class MockExternalDisplay {
         layout()
     }
 
-    /// 按当前视口与遥控台高度重新摆放替身窗口，并同步上报给监视器。
-    ///
-    /// 抽成独立方法是因为它有两个触发源：窗口刚装好时，以及遥控台高度变化时。
     private func layout() {
         guard let window, let windowScene else { return }
 
         let container = windowScene.coordinateSpace.bounds
         guard container.width > 0, container.height > 0 else { return }
 
-        let aspect = Self.aspectRatio
         let rect = Self.letterboxedRect(
             in: container.insetBy(dx: 20, dy: 60),
-            aspect: aspect,
-            reservedBottom: dockHeight
+            aspect: Self.aspectRatio
         )
         window.frame = rect
 
@@ -144,47 +122,22 @@ final class MockExternalDisplay {
 
     /// 在容器内按给定宽高比居中摆放，多出来的方向留黑边。
     ///
-    /// 底部预留 `reservedBottom`：手机屏底部常驻着遥控台（`RemoteControlDock`），
-    /// 而替身窗口浮在 `.normal + 1` 层、永远盖在主窗口之上，不主动避开的话
-    /// 展开遥控台时两者会在屏幕中段互相遮挡。
-    ///
-    /// **高度由调用方传进来**（= 遥控台上报的实际高度），不再写死常数 ——
-    /// 写死过一次 96，空鼠栏加上手势面之后就被盖住了。
-    ///
-    /// 注意窗口是**宽度受限**的：16:9 在 362pt 宽的可视区里只有 204pt 高，
-    /// 远小于可用的竖向空间。所以预留量只影响窗口的**纵向位置**，不影响尺寸 ——
-    /// 遥控台变高时窗口整体上移，下方留出的空白是"不遮挡"的必然代价。
-    private static func letterboxedRect(
-        in container: CGRect,
-        aspect: CGFloat,
-        reservedBottom: CGFloat
-    ) -> CGRect {
+    /// 窗口是**宽度受限**的：16:9 在 362pt 宽的可视区里只有 204pt 高，
+    /// 远小于可用的竖向空间，所以它总是落在容器正中。
+    private static func letterboxedRect(in container: CGRect, aspect: CGFloat) -> CGRect {
         guard container.width > 0, container.height > 0, aspect > 0 else { return container }
 
-        let available = CGRect(
-            x: container.minX,
-            y: container.minY,
-            width: container.width,
-            height: max(container.height - reservedBottom, 0)
-        )
-        guard available.height > 0 else { return container }
-
-        if available.width / available.height > aspect {
-            let width = available.height * aspect
-            return CGRect(x: available.midX - width / 2, y: available.minY, width: width, height: available.height)
+        if container.width / container.height > aspect {
+            let width = container.height * aspect
+            return CGRect(x: container.midX - width / 2, y: container.minY, width: width, height: container.height)
         } else {
-            let height = available.width / aspect
-            return CGRect(x: available.minX, y: available.midY - height / 2, width: available.width, height: height)
+            let height = container.width / aspect
+            return CGRect(x: container.minX, y: container.midY - height / 2, width: container.width, height: height)
         }
     }
 
-    /// 替身窗口假装的宽高比。缺省 `16:9`。
-    ///
-    /// 非 private：调试预置 `-remoteState strip=<index>` 要用它把素材条的槽心
-    /// 换算成**归一化**落点。那个落点只与宽高比有关
-    /// （见 `PanoramaStripGeometry.normalizedSlotCenter`），所以预置不需要知道
-    /// 替身窗口有多少点 —— 但它必须拿到**同一个**宽高比，否则指针会压到隔壁那条上。
-    static var aspectRatio: CGFloat { parseAspect() ?? 16.0 / 9.0 }
+    /// 替身窗口假装的宽高比。缺省 `16:9`，可用 `-mockExternalDisplayAspect` 改。
+    private static var aspectRatio: CGFloat { parseAspect() ?? 16.0 / 9.0 }
 
     /// 支持 `-mockExternalDisplayAspect=4:3` 与 `-mockExternalDisplayAspect 4:3` 两种写法。
     private static func parseAspect() -> CGFloat? {

@@ -21,16 +21,6 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Sources
-      # 全景素材：`Scripts/fetch-panorama-assets.sh` 取回的那批（不入库，在 gitignore 的
-      # `.scratch/` 下）。作为**可选** folder 资源打进 bundle，目录结构原样保留 ——
-      # `PanoramaAssetCatalog` 按 `panorama-assets/<文件名>` 读。
-      #
-      # `optional: true` 是这条的关键：没跑过获取脚本的机器上该目录不存在，
-      # 工程照常生成、App 照常起，只是 `real` 档静默回落网格
-      # （spec §4.6 那条「素材与代码解耦」）。
-      - path: .scratch/panorama-assets
-        type: folder
-        optional: true
     settings:
       base:
         PRODUCT_NAME: ExternalDisplayDemo

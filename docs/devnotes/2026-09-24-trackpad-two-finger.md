@@ -3,7 +3,7 @@
 > 2026-09-24 · 分支级实验记录
 >
 > 相关：README 第四节（交互）、[`docs/scroll-feel.md`](../scroll-feel.md)、
-> [`2026-09-24-airmouse-gesture.md`](2026-09-24-airmouse-gesture.md)
+> [`2026-09-24-airmouse-gesture.md`](../legacy/2026-09-24-airmouse-gesture.md)（已归档）
 
 ## 需求
 

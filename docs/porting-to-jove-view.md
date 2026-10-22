@@ -2,7 +2,17 @@
 
 > 源工程 `ExternaldisplayDemo`（本仓），目标工程 `jove-view`。
 > 结论状态：源侧**全景线已无未完成的票**，683 条纯函数断言全绿（2026-09-28）。
-> 目标侧**尚未动工**；本文第 4.1 节是导出清单，第 6 节是移植路线。
+> 目标侧 **P1（纯几何层）+ P2 / P3 / P4 全部落地**（2026-09-28）：
+> 几何层三文件 + 34 用例；行为层再 +37 用例 / 7 suite，**全量回归 1110 / 154**，
+> 全景页在目标仓**已可见**（素材从相册认投影档、HUD 双击退出、归零、FOV 60/90/120）。
+> **只剩 P0（真机 IMU 判读）未做**。本文第 4.1 节是导出清单，第 6 节是移植路线。
+>
+> ⚠️ **跨仓一处已知分叉**：目标仓按用户拍板把**柱面拖动方向统一成「转身」**
+> （`CylindricalPan` 取反），**本仓仍是「跟手」** ⇒ 两仓同名函数**符号相反**。
+> 要不要把本仓也翻过来**待拍板**（见目标仓 `docs/devnotes/2026-09-28-panorama-detail-migration.md` §5.1）。
+> 另：目标仓**没搬**四档帧源里的 `.frame` / `.animated` 两档（它们是本文为验证「帧源与几何解耦」
+> 而立的脚手架），也**没搬**素材条 —— 那边控件落在**眼镜屏**上（本仓外接屏是 `NonInteractive`
+> 收不到触摸，所以本仓只能放手机；目标仓眼镜屏有激光指针 + 焦点系统）。
 
 ---
 
@@ -180,7 +190,7 @@ LookInput / PadGesture / TapSequence
 
 | 手段 | 覆盖 | 位置 |
 |---|---|---|
-| 纯函数断言（667 条） | 状态 → 布局/投影/符号 | `.scratch/verify/main.swift` |
+| 纯函数断言（**683 条**） | 状态 → 布局/投影/符号 | `.scratch/verify/main.swift` |
 | 启动参数预置状态 | 让目标状态**开机就在**，可与基线逐像素比对 | `MockRemoteState`（`pano=` `look=` `fov=` `detail=`） |
 | 截图核对 | 外接屏真实像素 | `-mockExternalDisplay` 替身窗口 + `simctl io screenshot` |
 | 包围盒定位 | 替身窗口位置随遥控台高度漂移，必须每次重量 | `.scratch/tools/bbox` |
@@ -268,9 +278,9 @@ LookInput / PadGesture / TapSequence
 | 阶段 | 内容 | 产出判据 |
 |---|---|---|
 | **P0 · 判读** | 真机上把 `rate` 三分量与两个投影轴打到控制台，让用户做「左右动手机」 | 确定用户手势落在哪个通道 ⇒ 定 A 或 B 方案（§6.2 第 3 条） |
-| **P1 · 内核** | 搬 `EquirectProjection` / `PanoramaProjection` / `LookInput` 的页面映射部分 | XCTest 断言 `facingLongitude == yaw`、`fovStops`、拖动符号，**先红后绿** |
+| ✅ **P1 · 内核**（**2026-09-28 落地**） | 已搬进 `joveview/ExternalDisplay/`（**命名与源仓一致**，便于将来 `diff` 两个仓） | ✅ 本仓 **34 用例 / 4 suite** 全绿（用的是 **swift-testing**，不是 XCTest）；全量 **1069 / 147**（对照基线 1035 / 143 ⇒ **+34 / +4** 精确吻合）；源仓 683 条复跑全绿。⚠️ **注释未搬** —— jove-view 是零注释的仓，不变量改由测试名承载。见 `jove-view/docs/devnotes/2026-09-28-panorama-geometry-migration.md` |
 | **P2 · 接线** | `RemoteControl` 加视角量 + 页面分流；`PointerController` 加「喂视角」模式 | 单测覆盖分流（哪一页改哪个量） |
-| **P3 · 渲染** | 全景详情页 + 素材入口 + FOV 选择器 | 截图核对：三档 fov 恰好卡边缘、`yaw 180°` 标签居中 |
+| **P3 · 渲染** | 全景详情页 + 素材入口 + FOV 选择器。**用户 2026-09-28 追加三条**：① HUD 提示「**双击退出浏览**」（防出不来）② **归零**入口 ③ FOV **60 / 90 / 120** 三档可切 | 截图核对：三档 fov 恰好卡边缘、`yaw 180°` 标签居中；**且 chrome 被隐藏时 HUD 仍可见**（否则「返回键没了 = 出不来」） |
 | **P4 · 收尾** | 归零入口、页脚读数、退出路径 | 验「全景页里指针还在动吗」（设 I 的闲置手势风险） |
 
 ### 6.5 移植时必须一并带走的「负资产警告」
@@ -297,6 +307,63 @@ LookInput / PadGesture / TapSequence
 | B5 | 真机 + HDMI 适配器外接屏 | **从未实测**（无适配器）。模拟器替代不了（`UIScreen.screens.count == 1`） |
 | B6 | ~~球面 × 逐帧纹理~~ | ✅ **已完成**（票 `05`，2026-09-28） |
 | B7 | **实时取帧**（解码器帧回调 → 纹理上传） | 源侧**无解**：demo 没有视频管线。本线验的是"帧源与几何解耦"这条几何性质，时序那一层留给真实工程。**目标侧有地基**：jove-view 走 `AVAssetReader` 逐帧解码 → `CVPixelBuffer`（`ImageConversion` 已开 Metal 兼容），不需要 `AVPlayerItemVideoOutput`；要解的是"线性解码 ↔ 可 seek/暂停/循环"的帧供给对齐 |
+
+---
+
+## 8. 全景 × 3D（**目标侧**新增约束）
+
+> 这一节不是源侧的盲区，而是 **jove-view 特有的** —— 目标侧有 3D 管线，demo 没有。
+> 搬过去时**必须处理**，否则是可见 bug。
+
+### 8.1 不处理会怎样（硬约束）
+
+`joveview/ExternalDisplay/GlassesMediaDetailModel.swift:107` 的默认分支：
+
+```swift
+if phase != .twoD {
+    return kind == .video && hasLiveDepth ? .liveDepth : .composite
+}
+```
+
+⇒ **3D 模式下非视频素材一律走 `.composite`** ⇒ 全景图会被自动送进
+`MediaDetailCompositeView.render()`（`GlassesMediaDetailView.swift:476`）跑 `renderPhoto`，
+拿到一张**左右并排的立体图（双倍宽）**。而全景页若按「单张 equirect」铺窗口，
+就会把半张 SBS 当整张全景 —— 画面错乱（左边是左眼的世界、右边是另一个位置的世界）。
+
+⇒ **全景页必须自己声明 3D 分支**，不能让这条默认逻辑接管。
+
+### 8.2 顺的地方
+
+| 点 | 证据 |
+|---|---|
+| 现成管线 | `JoveSession.apply(_:)` :37 收 `result.compositeImage`；`engine.renderPhoto(from:)` |
+| 输出本就是双倍宽 | `MetalDepthCompositor.stereo` :30「左右全宽立体，用于 VR / 3D 显示」，`isDoubleWidth: true` |
+| 视差方向天然对 | equirect 的水平方向**就是经度方向**，与球面双目的水平视差同轴 |
+| `tileCount` 同形 | 现有「补接缝画 2 份」与「双眼各 1 份」形状一致 |
+
+### 8.3 三个真问题（未验）
+
+1. **equirect 上跑透视训练的深度模型**：VDA 在透视投影上训练，equirect 极区拉伸严重
+   ⇒ 上下边缘深度**不可信**；地平线附近形变最小，**可能**可用。**必须实测，不许推断。**
+2. **底图分辨率**：`MediaDetailCompositeView.loadBase()` :519 用 `framing.base`（fit 到视口）
+   取缩略图；全景贴图要放大数倍视口宽 ⇒ 3D 全景必须**按原图分辨率**单独取底图。
+3. **接缝 per-eye**：SBS 左右各自是完整 360° ⇒ 每只眼各补自己那一圈的接缝；
+   现在 `tileCount` 是全局语义，3D 要改成 per-eye。
+
+### 8.4 处置（**已拍板：本阶段不做全景 3D**，2026-09-28）
+
+- **不做 3D 化**：不给全景图跑深度、不做视差。3D 相关全部推后，不立票、不排期。
+- ⚠️ **但「不做」不等于「不管」**：§8.1 那条默认分支仍在 ⇒ 必须显式**降级**，
+  否则 3D 模式下进全景页会拿到半张 SBS，画面错乱。
+  降级要同时满足两点：
+  1. **不请求 `renderPhoto`** —— 不产 composite，直接用原 equirect 铺窗口；
+  2. **左右 panel 显示同一份内容** —— 眼镜 3D 模式下屏被切成两个 panel，
+     若只铺一张图会变成「每只眼只有半张」；必须复制一份，让每只眼看到完整画面。
+  缺 ② 仍会错，只是错法从「错乱」变成「每只眼缺一半」——同样不能放过。
+- `tileCount` 的语义留成「**由投影给定**」而不是写死「补接缝」——
+  将来若要接 3D，不必动几何。这是唯一为将来留的口子，**成本为零**。
+- 若将来重启：先做**质量验证**（一张 equirect → `renderPhoto` → 看极区与接缝），
+  再谈几何。⚠️ 与 §6.2 同一条纪律：**未知量不要叠加**。
 
 ---
 
