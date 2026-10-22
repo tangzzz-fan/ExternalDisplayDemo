@@ -86,9 +86,6 @@ final class RemoteControl {
     /// 轻点计数。外接屏侧靠它的变化触发一次涟漪反馈。
     private(set) var tapCount: Int = 0
 
-    /// 最近一次离散手势的说明，手机端状态栏直读。
-    private(set) var lastEvent: String = "等待操作"
-
     private init() {}
 
     // MARK: - 滚动与过卷
@@ -100,18 +97,10 @@ final class RemoteControl {
     func scroll(by dy: CGFloat) {
         guard dy != 0 else { return }
 
-        let next = min(
+        position = min(
             max(position - dy, -PullCurve.rawLimit),
             1 + PullCurve.rawLimit
         )
-
-        // 只在过卷真正开始的那一刻记一次事件，避免逐帧刷屏
-        if next < 0, position >= 0 {
-            lastEvent = "下拉露出底层"
-        } else if next > 1, position <= 1 {
-            lastEvent = "上拉露出底层"
-        }
-        position = next
     }
 
     /// 直接落到某个滚动进度，供调试预置使用。
@@ -120,12 +109,10 @@ final class RemoteControl {
     /// 留着下拉会让内容停在半路。
     func scroll(to value: CGFloat) {
         position = Self.clamp(value, 0, 1)
-        lastEvent = "跳转到 \(Int(scroll * 100))%"
     }
 
     func scrollToTop() {
         position = 0
-        lastEvent = "回到顶部"
     }
 
     /// 直接落到某个下拉进度（`0...1`），供调试预置使用。
@@ -134,9 +121,6 @@ final class RemoteControl {
     /// 不可能同时是正的滚动进度和负的下拉行程。
     func pull(to value: CGFloat) {
         position = -PullCurve.rawValue(forProgress: Self.clamp(value, 0, 1))
-        lastEvent = value > 0
-            ? "下拉 \(Int(pull * 100))%"
-            : "收起底层"
     }
 
     /// 直接落到某个底部上拉进度（`0...1`），供调试预置使用。
@@ -146,9 +130,6 @@ final class RemoteControl {
     /// 这不是缺陷，而是"滚动进度"与"过卷行程"本来就该分开表达。
     func bottomPull(to value: CGFloat) {
         position = 1 + PullCurve.rawValue(forProgress: Self.clamp(value, 0, 1))
-        lastEvent = value > 0
-            ? "上拉 \(Int(bottomPull * 100))%"
-            : "收起底层"
     }
 
     // MARK: - 光标
@@ -162,7 +143,6 @@ final class RemoteControl {
 
     func setZoom(_ value: CGFloat) {
         zoom = Self.clamp(value, Self.zoomRange.lowerBound, Self.zoomRange.upperBound)
-        lastEvent = String(format: "缩放 %.2f×", zoom)
     }
 
     /// 相对缩放，`factor > 1` 放大。捏合手势逐帧调用。
@@ -176,7 +156,6 @@ final class RemoteControl {
     /// 一次确认。外接屏侧靠 `tapCount` 的变化触发涟漪。
     func tap() {
         tapCount += 1
-        lastEvent = "轻点 #\(tapCount)"
     }
 
     // MARK: - 复位
@@ -185,7 +164,6 @@ final class RemoteControl {
         position = 0
         zoom = 1
         pointer = nil
-        lastEvent = "已复位"
     }
 
     // MARK: - Helpers

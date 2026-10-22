@@ -45,8 +45,8 @@ struct GesturePadHint {
 /// 平手判给纵轴。
 struct GesturePad: View {
 
-    /// 静止时显示的提示行。
-    let hints: [GesturePadHint]
+    /// 静止时显示的提示行。手机端把提示画在手势面**下方**，这里留空。
+    var hints: [GesturePadHint] = []
 
     /// 采集面高度。`nil` 表示由父级决定 —— 手机端把它铺满整屏。
     ///

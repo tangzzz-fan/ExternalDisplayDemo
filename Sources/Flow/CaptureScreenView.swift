@@ -14,7 +14,8 @@ struct VideoPageView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.isOpaque = false
         webView.backgroundColor = .black
-        webView.scrollView.isScrollEnabled = false
+        // 站点页是「文字 + 视频」，要能滚；全屏播放时页面自己把 overflow 关掉。
+        webView.scrollView.isScrollEnabled = true
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
 
@@ -31,19 +32,23 @@ struct VideoPageView: UIViewRepresentable {
     }
 }
 
+/// 手机端的全屏站点页。
+///
+/// 这里**没有**「开始录制」按钮：入口在页面上那个播放键（一个真的播放键，
+/// 不是一个伪装成播放键的原生按钮）。点击 → `playrequest` → `DemoFlow.beginCapture()`
+/// → 系统录屏授权 → 采集就绪 → 页面收起站点进全屏播放。
+///
+/// 反过来（先播再申请）会丢掉开头几百毫秒，而录屏那一侧的东西就在那几百毫秒里。
 struct CaptureScreenView: View {
 
     let flow: DemoFlow
 
-    @State private var isStarting = false
-
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
+        ZStack(alignment: .top) {
             VideoPageView(controller: flow.page)
                 .ignoresSafeArea()
 
+            // 录制中：整屏接管成长按中止。播放前不能盖，否则播放键点不到。
             if flow.isCapturing {
                 Color.clear
                     .contentShape(Rectangle())
@@ -51,80 +56,57 @@ struct CaptureScreenView: View {
                     .onLongPressGesture(minimumDuration: 0.7) {
                         flow.abort()
                     }
-            } else {
-                startOverlay
             }
+
+            chrome
         }
+        .background(Color.black.ignoresSafeArea())
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .preferredColorScheme(.dark)
     }
 
-    private var startOverlay: some View {
-        VStack {
-            Spacer()
-
-            VStack(spacing: 16) {
-                VStack(spacing: 6) {
-                    Text("HTML 页面已在手机端就位")
-                        .font(.headline)
-                    Text("点开始后，屏幕内容会被 ReplayKit 原样录制")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-
-                Button {
-                    isStarting = true
-                    Task {
-                        await flow.beginCapture()
-                        isStarting = false
+    private var chrome: some View {
+        VStack(spacing: 0) {
+            // 录制中这一屏是要进成片的，所以除视频以外什么都不画 ——
+            // 返回/计时这类控件只在「还没开始录」时出现。中止靠长按。
+            if !flow.isCapturing {
+                HStack(spacing: 10) {
+                    Button {
+                        flow.abort()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .bold))
+                            .frame(width: 30, height: 30)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .foregroundStyle(.white)
                     }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "record.circle")
-                        Text(isStarting ? "正在启动…" : "开始录制")
-                    }
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(Color.red.opacity(isStarting ? 0.4 : 0.92), in: Capsule())
-                    .foregroundStyle(.white)
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
                 }
-                .disabled(isStarting)
-
-                if let errorText = flow.errorText {
-                    Text(errorText)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                        .multilineTextAlignment(.center)
-                }
-
-                HStack {
-                    Text("录制中长按屏幕任意处可中止")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Spacer(minLength: 8)
-
-                    Button("返回按钮页") { flow.abort() }
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
             }
-            .padding(22)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .padding(.horizontal, 16)
-            .padding(.bottom, 20)
+
+            Spacer(minLength: 0)
+
+            if let errorText = flow.errorText, !flow.isCapturing {
+                Text(errorText)
+                    .font(.footnote)
+                    .foregroundStyle(Color(red: 1, green: 0.7, blue: 0.68))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 24)
+            }
         }
-        .background(alignment: .bottom) {
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.85)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 420)
-            .allowsHitTesting(false)
-        }
+        .allowsHitTesting(true)
     }
+}
+
+#Preview {
+    CaptureScreenView(flow: DemoFlow.shared)
 }

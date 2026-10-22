@@ -30,8 +30,14 @@ enum MockDemoFlow {
         case "run":
             flow.activate(at: remote.pointer)
             Task {
-                try? await Task.sleep(for: .seconds(1.5))
-                await flow.beginCapture()
+                // 等页面把事件接好再点 —— 固定 sleep 会和 WKWebView 的加载竞速，
+                // 早一步点就是「点了没反应」。
+                _ = await flow.page.waitUntilReady()
+                try? await Task.sleep(for: .milliseconds(400))
+                // 走真人那条路：点页面上的播放键，而不是直接调 beginCapture。
+                #if DEBUG
+                flow.page.simulatePlayTap()
+                #endif
             }
         default:
             break

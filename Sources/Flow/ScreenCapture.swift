@@ -30,6 +30,12 @@ final class ScreenCapture {
     /// 系统首次弹出「允许屏幕捕捉」确认框时，等用户点完可能远超十秒。
     private static let startTimeout: TimeInterval = 30
 
+    /// 停止采集的兜底等待。
+    ///
+    /// 正常几十毫秒就回调；但不回调时不能把界面卡死在「正在生成录制文件」——
+    /// 已经交给 writer 的采样照样能收尾成文件。
+    private static let stopTimeout: TimeInterval = 5
+
     private var writer: RecordingWriter?
 
     private(set) var isRunning = false
@@ -46,10 +52,11 @@ final class ScreenCapture {
 
         do {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                let result = StartResult(continuation: continuation, writer: writer)
+                let gate = OnceGate { continuation.resume(with: $0) }
 
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.startTimeout) {
-                    guard result.finish(.failure(Failure.startFailed("启动超时，未收到系统回调"))) else { return }
+                    guard gate.finish(.failure(Failure.startFailed("启动超时，未收到系统回调"))) else { return }
+                    writer.cancel()
                     recorder.stopCapture { _ in }
                 }
 
@@ -71,9 +78,11 @@ final class ScreenCapture {
 
                     // 已经超时判过失败了：这次迟到的成功要把录制收回去，否则会留下一个
                     // 没人接管的采样流。
-                    if !result.finish(outcome) {
+                    guard gate.finish(outcome) else {
                         recorder.stopCapture { _ in }
+                        return
                     }
+                    if case .failure = outcome { writer.cancel() }
                 }
             }
         } catch {
@@ -88,7 +97,13 @@ final class ScreenCapture {
         // 之后 WKWebView 的媒体音会落到 ambient 上（手机一开静音就彻底没声），
         // 而 .audioApp 送来的采样全是 0 —— 成片有音轨但整条静音。
         // 采集已经起来了，这里再把会话要回来。
-        try? activateAudioSession()
+        do {
+            try activateAudioSession()
+        } catch {
+            #if DEBUG
+            print("[Capture] 采集启动后没能恢复 .playback 会话：\(error.localizedDescription)")
+            #endif
+        }
     }
 
     func stop() async throws -> URL {
@@ -98,7 +113,16 @@ final class ScreenCapture {
         self.writer = nil
 
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            RPScreenRecorder.shared().stopCapture { _ in continuation.resume() }
+            let gate = OnceGate { _ in continuation.resume() }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.stopTimeout) {
+                guard gate.finish(.success(())) else { return }
+                #if DEBUG
+                print("[Capture] stopCapture 超过 \(Self.stopTimeout) 秒未回调，按已到的采样收尾")
+                #endif
+            }
+
+            RPScreenRecorder.shared().stopCapture { _ in gate.finish(.success(())) }
         }
 
         defer { deactivateAudioSession() }
@@ -106,10 +130,12 @@ final class ScreenCapture {
     }
 
     func cancel() {
-        guard isRunning else { return }
-        isRunning = false
+        // 不拿 `isRunning` 当门：`beginCapture()` 在启动成功后仍可能立刻把这次录制
+        // 收回（启动期间用户点了「返回按钮页」），那时 `isRunning` 已经是 true，
+        // 而重复调解一次 `stopCapture` 本身是无害的。
         writer?.cancel()
         writer = nil
+        isRunning = false
         RPScreenRecorder.shared().stopCapture { _ in }
         deactivateAudioSession()
     }
@@ -135,43 +161,28 @@ final class ScreenCapture {
     }
 }
 
-private final class FrameTally: @unchecked Sendable {
+/// 一次性闸门：谁先到谁放行，后到的静默失败。
+///
+/// ReplayKit 的启动/停止各有一个「系统回调」和一个「本地超时」，两边都可能先到，
+/// 而 `CheckedContinuation` 只许 resume 一次 —— 这个类型就是那条判据。
+private final class OnceGate: @unchecked Sendable {
 
     private let lock = NSLock()
-    private var count = 0
+    private var resume: ((Result<Void, Error>) -> Void)?
 
-    func tick() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        count += 1
-        return count
-    }
-}
-
-private final class StartResult: @unchecked Sendable {
-
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
-    private let writer: RecordingWriter
-
-    init(continuation: CheckedContinuation<Void, Error>, writer: RecordingWriter) {
-        self.continuation = continuation
-        self.writer = writer
+    init(_ resume: @escaping (Result<Void, Error>) -> Void) {
+        self.resume = resume
     }
 
     @discardableResult
     func finish(_ result: Result<Void, Error>) -> Bool {
         lock.lock()
-        let pending = continuation
-        continuation = nil
+        let pending = resume
+        resume = nil
         lock.unlock()
 
         guard let pending else { return false }
-
-        if case .failure = result {
-            writer.cancel()
-        }
-        pending.resume(with: result)
+        pending(result)
         return true
     }
 }

@@ -37,7 +37,5 @@ final class DisplayContentStore {
     /// 关闭后 `TimelineView` 暂停，外接屏画面静止 —— 用于确认帧驱动是否来自本应用。
     var isAnimated: Bool = true
 
-    var caption: String = "External Display Demo"
-
     private init() {}
 }

@@ -2,13 +2,14 @@
 
 验证「iOS 17 起接入外部显示器（external display）」的最小可运行工程。
 
-只做两件事：**屏幕怎么连上**、**手机端手势怎么驱动它**。外接屏上没有任何业务内容 ——
-一块图案画布、一个光标环、一行读数。要往里加东西的，先读第七节。
+只做三件事：**屏幕怎么连上**、**手机端手势怎么驱动它**、**怎么把手机屏录下来再放回去**
+（手机端播 HTML → ReplayKit 采集 → 外接屏实时预览 / 回放成片）。外接屏上没有业务内容 ——
+一块图案画布、一个光标环、一行读数、三段演示页。要往里加东西的，先读第七节。
 
 - Deployment target：**iOS 17.0**
 - Bundle ID：`com.jove.externaldisplaydemo`
 - 手机端与外接屏均为 SwiftUI，接入层为 UIKit（scene + window）
-- 16 个源文件
+- 28 个源文件
 
 ---
 
@@ -161,7 +162,9 @@ if #available(iOS 27.0, *) {
 ExternaldisplayDemo/
 ├── project.yml                                    XcodeGen 配置（XcodeGen 2.46+）
 ├── Support/Info.plist                             scene manifest 在这里
+├── Resources/VideoPage/                           demo 站点：文字 + 视频，播放键触发录屏
 ├── docs/
+│   ├── recording-pipeline.md                      ★ 录屏链路（HTML → 采集 → 落盘/预览）的坑
 │   ├── mock-external-display.md                   -mockExternalDisplay 的原理
 │   ├── external-display-screenshot.md             外接屏内容怎么截图（搬移→抓屏→裁切→探针）
 │   ├── scroll-feel.md                             上下滑动为什么跟手（体感角度）
@@ -184,10 +187,24 @@ ExternaldisplayDemo/
     │   ├── ExternalDisplaySceneDelegate.swift     ★ iOS 17~26 的接入落点
     │   ├── ExternalDisplayRootView.swift          外接屏根视图（纯输出，无手势，自测量分辨率）
     │   ├── DisplayPatternCanvas.swift             逐帧渲染验证
-    │   └── DisplayScrollGeometry.swift            滚动 / 过卷几何 + 手感曲线（纯计算）
+    │   ├── DisplayScrollGeometry.swift            滚动 / 过卷几何 + 手感曲线（纯计算）
+    │   ├── GlassesLauncherCard.swift              按钮页：标题 / 按钮 / 状态与错误
+    │   ├── LivePreviewView.swift                  ★ AVSampleBufferDisplayLayer 承载实时帧
+    │   └── RecordedVideoView.swift                ★ AVPlayerLooper 循环回放成片
+    ├── Flow/                                      ★ 录屏链路，见 docs/recording-pipeline.md
+    │   ├── DemoFlow.swift                         三段状态机（launcher / capture / playback）
+    │   ├── CaptureScreenView.swift                手机端全屏站点页（播放键在页面里，无原生按钮）
+    │   ├── VideoPageController.swift              页面事件桥（ready / playrequest / started / ended）
+    │   ├── ScreenCapture.swift                    ReplayKit 采集（真机）
+    │   ├── SimulatedCapture.swift                 模拟器的替身帧源（只喂预览，不产出文件）
+    │   ├── RecordingWriter.swift                  采样 → mp4（AVAssetWriter）
+    │   ├── LivePreviewRelay.swift                 采样 → 外接屏显示层（跨线程中继）
+    │   ├── PageAudio.swift                        进程内播声音（WKWebView 的音 ReplayKit 采不到）
+    │   └── GlassesLauncherLayout.swift            按钮命中判定（归一化矩形，手机侧算）
     └── Debug/
         ├── MockExternalDisplay.swift              模拟器替身（不参与真机链路）
-        └── MockRemoteState.swift                  从启动参数预置视口状态，供截图验证
+        ├── MockRemoteState.swift                  从启动参数预置视口状态，供截图验证
+        └── MockDemoFlow.swift                     从启动参数跑一遍演示流程，供截图验证
 ```
 
 `DisplayScrollGeometry` 与 `PadGesture` **只依赖 `CoreGraphics` / `Foundation`**，
@@ -197,12 +214,13 @@ ExternaldisplayDemo/
 数据流：手机端手势面 → `RemoteControl` → 外接屏 `ExternalDisplayRootView` 自动重绘。
 两侧是**同一进程内的两个 UIScene，共享内存**，不需要任何跨进程通道。
 
-内容与交互拆成两份状态，各自职责单一：
+内容与交互拆成两份状态，各自职责单一；录屏这条链路另有一份自己的流程状态：
 
 | 状态 | 回答的问题 | 写入方 | 读取方 |
 | --- | --- | --- | --- |
 | `DisplayContentStore` | 外接屏**显示什么** | 入口 / 调试参数 | `ExternalDisplayRootView` |
 | `RemoteControl` | 外接屏**怎么看**（滚动 / 过卷 / 缩放 / 光标） | `GesturePad` | `ExternalDisplayRootView` |
+| `DemoFlow` | 演到**哪一步**、成片在哪 | 手机端手势面 / 页面事件 | `ExternalDisplayRootView`、`PhoneRootView` |
 
 ---
 
@@ -403,7 +421,8 @@ iOS 27 系统根本不给外接屏 scene → 只剩镜像）。所以「外接�
   接入层一行都不用动。先问一句：**这一页里指针还在动吗？** 不在，就得另开一个
   不依赖指针的入口 —— 非交互屏上任何"点得到的东西"都靠手机侧送过来的光标。
 - **本 demo 刻意没做的**：交互式外接屏（iPad 台前调度把应用窗口搬到外接屏）、
-  自定义分辨率协商、外接屏音频路由。
+  自定义分辨率协商、把音频路由到外接屏（声音只在手机侧播，见
+  `docs/recording-pipeline.md` 第七节）。
 
 ---
 

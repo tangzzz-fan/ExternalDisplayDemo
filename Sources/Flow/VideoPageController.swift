@@ -10,6 +10,8 @@ final class VideoPageController: NSObject {
         case playing
         case started(mediaTime: Double)
         case ended
+        /// 站点上的播放键被点了。要不要真的开始录屏由 `DemoFlow` 决定。
+        case playRequested
         case failed(String)
     }
 
@@ -59,16 +61,18 @@ final class VideoPageController: NSObject {
         webView?.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
     }
 
-    func play() {
-        evaluate("window.__page && window.__page.play();")
+    /// 采集已经在跑：让页面收起站点、全屏播、从头开始。
+    func beginPlayback() {
+        evaluate("window.__page && window.__page.beginPlayback();")
     }
 
-    func pause() {
-        evaluate("window.__page && window.__page.pause();")
-    }
-
-    func rewind() {
-        evaluate("window.__page && window.__page.rewind();")
+    /// 启动失败：把播放键还给用户，并说明原因。
+    func fail(_ message: String) {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: message,
+            options: [.fragmentsAllowed]
+        ), let literal = String(data: data, encoding: .utf8) else { return }
+        evaluate("window.__page && window.__page.fail(\(literal));")
     }
 
     func reset() {
@@ -76,6 +80,16 @@ final class VideoPageController: NSObject {
         isReady = false
         webView?.stopLoading()
     }
+
+    #if DEBUG
+    /// 调试用：替真人点一下页面上的播放键。
+    ///
+    /// `simctl` 没有触摸注入 API，`-mockFlow run` 要走**和真人完全一样**的
+    /// JS → 原生 → 授权 → 播放链路，就只能从这里点。
+    func simulatePlayTap() {
+        evaluate("document.getElementById('playButton').click();")
+    }
+    #endif
 
     private func evaluate(_ script: String) {
         webView?.evaluateJavaScript(script) { _, error in
@@ -109,6 +123,8 @@ final class VideoPageController: NSObject {
                 onEvent?(.started(mediaTime: (body["mediaTime"] as? NSNumber)?.doubleValue ?? 0))
             case "ended":
                 onEvent?(.ended)
+            case "playrequest":
+                onEvent?(.playRequested)
             case "error":
                 onEvent?(.failed("播放器报错（code \(code)）"))
             case "playfailed":

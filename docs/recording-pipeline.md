@@ -13,13 +13,13 @@
 
 ```
 手机屏                                 外接屏（非交互）
-┌──────────────┐                      ┌────────────────┐
-│ 手势面        │── 归一化坐标 ──▶     │ 按钮页 / 光标   │
-│ WKWebView    │   RemoteControl      │ 实时预览        │
-│  play mp4    │                      │ 回放            │
-└──────┬───────┘                      └───────▲────────┘
-       │ ReplayKit.startCapture               │
-       ▼                                      │
+┌──────────────────┐                  ┌────────────────┐
+│ 手势面            │── 归一化坐标 ──▶ │ 按钮页 / 光标   │
+│ WKWebView 站点页  │   RemoteControl  │ 实时预览        │
+│ 文字 + 视频        │                  │ 回放            │
+└──────┬───────────┘                  └───────▲────────┘
+       │ 播放键 → playrequest → startCapture    │
+       ▼                                        │
   CMSampleBuffer ──┬── 原 buffer ──▶ RecordingWriter ──▶ mp4
                    │                                      │
                    └── 复制包装 ──▶ LivePreviewRelay ──▶ 显示层
@@ -42,10 +42,13 @@
 | --- | --- | --- |
 | 外接屏播到 3 秒卡住，成片只有 2–3 秒 | 启动超时里 `stopCapture` 无条件执行 | `ScreenCapture.start()` |
 | 手机完全没有声音 | seek 打断 `play()` 抛 `AbortError`，被当成自动播放被拒 → 静音兜底 | `index.html` `startPlayback()` |
-| 手机有声音但外接屏那路还是静音 | `startCapture` 重配 `AVAudioSession`，把 `.playback` 顶掉 | `ScreenCapture.start()` |
+| 手机有声音但外接屏那路还是静音 | `startCapture` 重配 `AVAudioSession`，把 `.playback` 顶掉；**采集侧仍是零，见第七节** | `ScreenCapture.start()` |
 | 替身屏（mock）突然消失 | 删字段时把 `install()` 里唯一的 `isHidden = false` 一起删了 | `MockExternalDisplay.install()` |
 | 手机状态栏出现 `1086 × 610 px @3.̶0̶ 秒…` 这种乱码 | 分辨率与状态拼成一行后 `.lineLimit(1)` 中截断 | `PhoneRootView.statusBar` |
 | 成片有音轨但整条 −91 dB | WKWebView 的音频在别的进程渲染，ReplayKit 的 `.audioApp` 采不到 | 声音改由 `PageAudio` 在进程内播，见第七节 |
+| 录制在 13 秒左右自己收工，成片比素材短 | 兜底 deadline 写死 12 秒，而 `loadedmetadata` 还没到 | `DemoFlow.scheduleDeadlineStop()`，见第十一节 |
+| 录制点第二次不呼吸了 | 复用 `isPulseOn == true`，`onAppear` 置同值不触发动画 | `ExternalDisplayRootView`，见第十一节 |
+| 站点封面是一块纯黑，还以为是加载失败 | WKWebView 没播过就不画首帧，挪 `currentTime` 也不一定画 | `index.html` `primePoster()`，见第十二节 |
 
 ---
 
@@ -391,3 +394,183 @@ ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 /t
 **授权未核实**：`oceans.mp4` 是 video.js 的演示素材，没找到明确授权声明。
 只在本机 demo 用没问题，要外发就换成 Big Buck Bunny（CC-BY 3.0）或自拍素材。
 
+---
+
+## 十一、review 补的四个坑（真机上还没踩到，逻辑上必踩）
+
+前六条都是真机实测出来的。这四条是事后按代码路径推的 —— 都能在特定时序下发生，
+所以先记下来。
+
+### 坑 7：兜底 deadline 把成片截在 13 秒
+
+`scheduleDeadlineStop()` 原来写的是 `videoDuration > 0 ? videoDuration : 12`，
+而 `videoDuration` 来自页面的 `loadedmetadata`。
+
+`beginCapture()` 只等 `ready`（脚本末尾同步发出），`loadedmetadata` 是视频元数据解析完之后
+才发的，**两者没有先后保证**。真机上开录要先过系统授权框，通常来得及；但素材解析慢
+（冷启动第一次读 moov）、或者授权框早就允许过、点击到开录只有几十毫秒时，
+`videoDuration` 还是 0 → deadline 按 12 秒排 → 20 秒素材在 13.2 秒被 `finishCapture()` 收掉，
+**没有任何报错**，症状和第二节「只录到 2–3 秒」几乎一样。
+
+改法两头都堵：
+
+```swift
+// 兜底值只兜「loadedmetadata 永远不来」，不再假装自己是正常时长
+private static let unknownDurationLimit: Double = 60
+
+// metadata 到位后重排一次
+case .metadata(let duration, _):
+    videoDuration = duration
+    if phase == .capture, isCapturing { scheduleDeadlineStop() }
+```
+
+教训：**兜底值不能同时承担「正常值」和「病态值」两个角色。** 一旦兜底值比正常值小，
+它就变成了一个静默的截断器。
+
+### 坑 8：`ended` 有两个来源，逐帧链有两条
+
+`index.html` 里结束有两条来源：DOM 的 `player.addEventListener('ended')`，
+和 `requestVideoFrameCallback` 里按 `mediaTime >= duration - 0.08` 判定。
+两条都直接 `post('ended')`，原生侧靠 `guard phase == .capture, isCapturing` 挡掉第二次 ——
+**靠下游守卫兜住上游的重复**，不是幂等。
+
+顺带发现同一段里逐帧链被起了两次：脚本末尾 `watchFrames()` 一次，`rewind()` 又一次
+（因为原来链在 `endPosted` 为真时就掐断，`rewind()` 得重起）。同一次播放里两条链并存，
+每帧回调走两遍。
+
+改法：
+
+```js
+function postEnded(mediaTime) {
+  if (endPosted) { return; }
+  endPosted = true;
+  post('ended', { duration: player.duration, mediaTime: mediaTime });
+}
+```
+
+逐帧链改成**永不断链**（暂停时 rVFC 本来就不触发，继续播自己接上），入口用 `watching` 去重。
+
+教训：**同一个事实只能有一个上报口。** 谁先到不重要，重要的是第二条被上报函数自己挡掉，
+而不是指望消费者幂等。
+
+### 坑 9：停止采集没有超时
+
+`start()` 在第二节已经补了 30 秒超时（授权框要人点），`stop()` 却是裸等：
+
+```swift
+await withCheckedContinuation { RPScreenRecorder.shared().stopCapture { _ in continuation.resume() } }
+```
+
+回调不来就永远停在「正在生成录制文件」。第二节已经证明这个系统的回调会撒谎/失约，
+那么停止侧也得有上界：
+
+```swift
+private static let stopTimeout: TimeInterval = 5
+```
+
+超时后**照样往下走**，`writer.finish()` 把已经到手的采样收尾成文件 —— 丢尾不丢片。
+
+教训：**给一个异步调用加了超时，就要检查同一条链路上另一半。** 起和停是同一个系统的两次回调。
+
+### 坑 10：启动期间被中止，采样流没人收
+
+`abort()` 里收采样流的条件是 `isCapturing && !isSimulatedCapture`。
+而 `beginCapture()` 在 `await capture.start()` 期间 `isCapturing` **还是 false**
+（它在 await 之后才置 true）。用户这时点「返回按钮页」→ `abort()` 什么都不收 →
+`start()` 返回后照常 `isCapturing = true`、`page.play()`、排 deadline，而 `finishCapture()`
+被 `phase == .capture` 挡掉 → **ReplayKit 一直在采，没人停**。
+
+改法：`await` 回来先复查意图，再看要不要继续：
+
+```swift
+guard phase == .capture else {
+    capture.cancel()
+    simulated.stop()
+    return
+}
+```
+
+教训：**跨 `await` 的状态检查要在 `await` 之后重做一遍。** 决定「要不要开始」的是 await 之前的意图，
+决定「现在还能不能算开始」的是 await 之后的状态。
+
+---
+
+## 十二、入口挪到页面上：播放键 → 申请录屏 → 全屏播放
+
+### 为什么不是原生按钮
+
+最早的入口是手机端全屏页上叠一个原生「开始录制」按钮，页面在底下。这有两个毛病：
+
+1. **按钮和视频不在同一个坐标系里**，演示时看着像"点了外面的按钮才把里面的东西打开"；
+2. 站点页改成「文字 + 视频」之后，原生按钮会盖住内容，而那正是要被录进去的画面。
+
+现在入口就是页面上的那个播放键 —— 一个真的播放键。
+
+### 顺序：先起采集，再让页面全屏播
+
+```
+用户点播放键
+  → JS post('playrequest')
+  → DemoFlow.beginCapture()
+  → ScreenCapture.start()（系统弹「允许屏幕捕捉」）
+  → 用户点「录屏」
+  → window.__page.beginPlayback()              ← 收站点、满屏、从头播
+```
+
+**反过来（先全屏播再申请授权）会丢掉开头几百毫秒**，而那几百毫秒正好是用户
+最想确认的部分（"我点下去它有没有反应"）。授权框是人点的，等待时间不可控，
+所以只能让画面等采集，不能让采集等画面。
+
+### 失败要把按钮还回去
+
+`beginCapture()` 的三条失败路径（页面没就绪 / `start()` 抛错 / 超时）都会走
+`failCapture()` → `page.fail(message)`。少了这一步，页面会永远停在
+「正在请求录屏」—— 按钮被自己禁用，用户只能退出去重进。
+
+### 音画同步：`play()` 之前必须**真的**回到 0
+
+`player.currentTime = 0; player.play()` 是赌：seek 是异步的，`play()` 可能从旧位置起播，
+页面报给原生的 `mediaTime` 就是中间值 —— 声音按它 seek，结果**成片最后几秒没有声音**
+（真机实测：缺的秒数正好等于旧位置）。
+
+```js
+function rewindToZero() { /* 等 seeked，兜底 400ms */ }
+beginPlayback: function () {
+  player.pause();
+  rewindToZero().then(function () { if (autoplay) { startPlayback(); } });
+}
+```
+
+修完之后 `started` 的 `mediaTime` 是 `0.000`，19 秒处仍有声。
+
+### 站点封面：`primePoster()`
+
+WKWebView 在没播过之前**可能一帧都不画**，`currentTime = 0.05` 也不保证生效，
+封面就是纯黑 —— 看起来像加载失败。
+
+```js
+function primePoster() {
+  if (requested || startedPosted) { return; }
+  var attempt = player.play();
+  if (attempt && attempt.then) {
+    attempt.then(function () { if (!requested) { player.pause(); } });
+  }
+}
+```
+
+两条约束：**静音短播**（`player.muted = true` 早就设了）；**必须先于用户点击**，
+否则 `started` 会被这次预播抢先发出去。
+
+### 横屏与「眼镜屏跟着转」：整体撤回
+
+试过一段时间的方案是：用户授权后手机转横屏，眼镜屏那侧把画面转 90° 并铺满。
+撤回的原因不是做不出来，是**代价与收益不成比例**：
+
+| 事实 | 后果 |
+| --- | --- |
+| ReplayKit 的缓冲尺寸在 `startCapture` 那一刻就定死（`884×1920`） | 转屏之后画面以 90° 塞进竖缓冲，只能靠轨道矩阵补回来 |
+| 转屏请求 `requestGeometryUpdate` 在真机上**偶发被静默丢弃**（错误回调都不来，`mask` 与各 window 的 `supported` 都正确） | 只能轮询 bounds + 重试，且失败时成片不能补矩阵（会把正确竖片标成横的） |
+| 一条轨道只有一个 transform | 转屏前后的两种朝向无法共存，必须丢帧 |
+
+于是：**手机保持竖屏，眼镜屏按原样 `resizeAspect` 装入**（多余的地方留黑边），
+录制与回放都不做旋转。这三条经验留着，哪天要做「真正的横屏录制」先看这里。

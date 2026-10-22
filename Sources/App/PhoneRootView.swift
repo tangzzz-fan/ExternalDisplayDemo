@@ -26,7 +26,6 @@ struct PhoneRootView: View {
 
                 VStack(spacing: 14) {
                     GesturePad(
-                        hints: [],
                         scrollGesture: .twoFinger,
                         onTap: {
                             remote.tap()

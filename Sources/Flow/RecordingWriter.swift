@@ -42,6 +42,8 @@ final class RecordingWriter: @unchecked Sendable {
 
             if writer == nil {
                 pending.append((buffer, type))
+                // 要拿到第一帧视频的格式才知道 writer 的尺寸，在那之前只能先攒着。
+                // 上限只是不让它无限涨；超了丢最旧的，宁可少几帧也不能吃满内存。
                 if pending.count > 240 { pending.removeFirst() }
                 scheduleDecision()
                 return
@@ -226,6 +228,11 @@ final class RecordingWriter: @unchecked Sendable {
         }
     }
 
+    /// 收尾前把队列排空。
+    ///
+    /// `AVAssetWriterInput` 什么时候收下数据由它自己决定（`isReadyForMoreMediaData`），
+    /// 这里只能轮询等。`stopCapture` 已经等过回调，不会再进新数据，所以等是安全的；
+    /// 5 秒只是防止某个 input 卡在不可写状态上把收尾也拖死。
     private func drainUntilEmpty() {
         let deadline = Date().addingTimeInterval(5)
 

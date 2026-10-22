@@ -18,6 +18,9 @@ struct LivePreviewView: UIViewRepresentable {
     }
 }
 
+/// 承载 `AVSampleBufferDisplayLayer` 的容器。
+///
+/// 采样按原样送进来：不旋转、不裁切，装不下的地方留黑边。
 final class PreviewContainerView: UIView {
 
     override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }

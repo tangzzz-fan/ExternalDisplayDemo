@@ -142,8 +142,7 @@ struct ExternalDisplayRootView: View {
         return ZStack(alignment: .topLeading) {
             Color.black
 
-            LivePreviewView()
-                .frame(width: viewport.width, height: viewport.height)
+            preview(viewport)
 
             HStack(spacing: base * 0.02) {
                 Circle()
@@ -169,19 +168,22 @@ struct ExternalDisplayRootView: View {
             .frame(width: viewport.width, alignment: .topLeading)
             .shadow(color: .black.opacity(0.85), radius: base * 0.02)
 
-            Text("实时画面 · \(flow.statusText)")
+            Text("实时画面 · \(flow.statusText) · 长按手机屏幕可中止")
                 .font(.system(size: base * 0.026, weight: .regular))
                 .foregroundStyle(.white.opacity(0.6))
                 .padding(base * 0.045)
                 .frame(width: viewport.width, height: viewport.height, alignment: .bottomLeading)
                 .shadow(color: .black.opacity(0.85), radius: base * 0.02)
         }
-        .frame(width: viewport.width, height: viewport.height)
+        .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
         .onAppear {
             withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
                 isPulseOn = true
             }
         }
+        // 呼吸动画靠 false→true 这一次状态变化启动。第二次录制时 `isPulseOn` 还是
+        // true，`onAppear` 再置一次同值不会触发动画，录制点会僵在 0.3 透明度上。
+        .onDisappear { isPulseOn = false }
     }
 
     private var captureTitle: String {
@@ -199,8 +201,13 @@ struct ExternalDisplayRootView: View {
         return String(format: "%02d:%04.1f", Int(seconds) / 60, seconds.truncatingRemainder(dividingBy: 60))
     }
 
-    // MARK: - 回放
+    /// 录制中的实时画面：采样按原样送来，按比例装进这块屏，多余的地方留黑边。
+    private func preview(_ viewport: CGSize) -> some View {
+        LivePreviewView()
+            .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
+    }
 
+    // MARK: - 回放
     private func playbackLayer(_ viewport: CGSize) -> some View {
         let base = min(viewport.width, viewport.height)
 
@@ -209,7 +216,7 @@ struct ExternalDisplayRootView: View {
 
             if let url = flow.recordedURL {
                 RecordedVideoView(url: url)
-                    .frame(width: viewport.width, height: viewport.height)
+                    .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
             }
 
             Text(playbackCaption)
@@ -218,34 +225,7 @@ struct ExternalDisplayRootView: View {
                 .padding(base * 0.045)
                 .shadow(color: .black.opacity(0.8), radius: base * 0.02)
         }
-        .frame(width: viewport.width, height: viewport.height)
-    }
-
-    // MARK: - 底层
-
-    /// 常驻在最底下的一层。内容被推走 / 滚到底之后露出来的就是它。
-    ///
-    /// 标识上下各放一处：下拉满行程露出上半屏、上拉满行程露出下半屏，
-    /// 只放一处的话总有一次露出的是纯黑，看起来像渲染没跟上。
-    private func backdrop(_ viewport: CGSize) -> some View {
-        let base = min(viewport.width, viewport.height)
-        return ZStack {
-            Color.black
-
-            VStack(spacing: 0) {
-                marker(base).padding(.top, viewport.height * 0.2)
-                Spacer(minLength: 0)
-                marker(base).padding(.bottom, viewport.height * 0.26)
-            }
-        }
-        .frame(width: viewport.width, height: viewport.height)
-        .clipped()
-    }
-
-    private func marker(_ base: CGFloat) -> some View {
-        Text("EXTERNAL DISPLAY")
-            .font(.system(size: base * 0.038, weight: .medium, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.15))
+        .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
     }
 
     // MARK: - 内容

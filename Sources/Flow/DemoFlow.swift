@@ -50,7 +50,7 @@ final class DemoFlow {
 
         errorText = nil
         phase = .capture
-        statusText = "页面已打开，等待开始录制"
+        statusText = "页面已打开，点视频上的播放键"
         isPagePresented = true
     }
 
@@ -61,8 +61,7 @@ final class DemoFlow {
         statusText = "等待页面就绪"
 
         guard await page.waitUntilReady() else {
-            errorText = "HTML 页面没有在 6 秒内就绪"
-            statusText = "页面未就绪"
+            failCapture("HTML 页面没有在 6 秒内就绪")
             return
         }
 
@@ -73,8 +72,7 @@ final class DemoFlow {
                 try await capture.start()
                 isSimulatedCapture = false
             } catch {
-                errorText = error.localizedDescription
-                statusText = "录屏启动失败"
+                failCapture(error.localizedDescription)
                 return
             }
         } else {
@@ -84,21 +82,41 @@ final class DemoFlow {
             }
         }
 
+        // 启动期间用户可能按了「返回按钮页」。那时 `isCapturing` 还是 false，
+        // `abort()` 不会去收采样流 —— 这里补上，否则会留下一个没人接管的录制。
+        guard phase == .capture else {
+            capture.cancel()
+            simulated.stop()
+            return
+        }
+
         isCapturing = true
         captureStartedAt = .now
         statusText = isSimulatedCapture ? "模拟录制（本机无 ReplayKit）" : "录制中"
 
-        page.rewind()
-        page.play()
+        page.beginPlayback()
 
         scheduleDeadlineStop()
     }
 
+    /// 启动失败：页面按钮要还回去，手机状态栏与错误条共用同一句话。
+    private func failCapture(_ message: String) {
+        errorText = message
+        statusText = "录屏启动失败"
+        page.fail(message)
+    }
+
+    /// 页面还没报出素材时长时的兜底上限。
+    ///
+    /// 只兜「`loadedmetadata` 永远不来」这种病态情况，所以取一个明显长于素材的值；
+    /// 用它当正常时长会把 20 秒的片子截在 12 秒（旧值就是 12）。
+    private static let unknownDurationLimit: Double = 60
+
     private func scheduleDeadlineStop() {
         deadlineTask?.cancel()
-        let duration = videoDuration > 0 ? videoDuration : 12
+        let limit = videoDuration > 0 ? videoDuration + 1.2 : Self.unknownDurationLimit
         deadlineTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(duration + 1.2))
+            try? await Task.sleep(for: .seconds(limit))
             guard !Task.isCancelled else { return }
             await self?.finishCapture()
         }
@@ -180,23 +198,35 @@ final class DemoFlow {
         switch event {
         case .ready:
             if phase == .capture, !isCapturing {
-                statusText = "页面已加载，等待开始录制"
+                statusText = "页面已加载，点播放键开始录制"
             }
         case .metadata(let duration, _):
             videoDuration = duration
+            // 时长到位后重排收工时间：开录时若还没拿到时长，deadline 是按兜底值排的。
+            if phase == .capture, isCapturing {
+                scheduleDeadlineStop()
+            }
         case .playing:
             if isCapturing {
                 statusText = isSimulatedCapture ? "模拟录制（本机无 ReplayKit）" : "录制中"
             }
         case .started(let mediaTime):
             guard phase == .capture, isCapturing else { return }
+            #if DEBUG
+            print(String(format: "[Flow] started mediaTime=%.3f", mediaTime))
+            #endif
             pageAudio.start(url: Self.bundledVideoURL(), from: mediaTime)
         case .ended:
             guard phase == .capture, isCapturing else { return }
             finishTask = Task { await finishCapture() }
+        case .playRequested:
+            // 站点上的播放键 = 这次演示的入口。录屏授权由 `capture.start()` 触发。
+            guard phase == .capture, !isCapturing else { return }
+            Task { await beginCapture() }
         case .failed(let message):
             errorText = message
             statusText = "页面出错"
+            page.fail(message)
         }
     }
 
