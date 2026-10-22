@@ -8,8 +8,8 @@ final class VideoPageController: NSObject {
         case ready
         case metadata(duration: Double, pixelSize: CGSize)
         case playing
+        case started(mediaTime: Double)
         case ended
-        case mutedFallback(String)
         case failed(String)
     }
 
@@ -105,10 +105,10 @@ final class VideoPageController: NSObject {
                 onEvent?(.metadata(duration: duration, pixelSize: CGSize(width: width, height: height)))
             case "playing":
                 onEvent?(.playing)
+            case "started":
+                onEvent?(.started(mediaTime: (body["mediaTime"] as? NSNumber)?.doubleValue ?? 0))
             case "ended":
                 onEvent?(.ended)
-            case "mutedfallback":
-                onEvent?(.mutedFallback(message))
             case "error":
                 onEvent?(.failed("播放器报错（code \(code)）"))
             case "playfailed":

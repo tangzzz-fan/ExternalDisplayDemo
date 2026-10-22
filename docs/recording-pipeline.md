@@ -45,7 +45,7 @@
 | 手机有声音但外接屏那路还是静音 | `startCapture` 重配 `AVAudioSession`，把 `.playback` 顶掉 | `ScreenCapture.start()` |
 | 替身屏（mock）突然消失 | 删字段时把 `install()` 里唯一的 `isHidden = false` 一起删了 | `MockExternalDisplay.install()` |
 | 手机状态栏出现 `1086 × 610 px @3.̶0̶ 秒…` 这种乱码 | 分辨率与状态拼成一行后 `.lineLimit(1)` 中截断 | `PhoneRootView.statusBar` |
-| 成片有音轨但整条 −91 dB | **未解决**，见第七节 | — |
+| 成片有音轨但整条 −91 dB | WKWebView 的音频在别的进程渲染，ReplayKit 的 `.audioApp` 采不到 | 声音改由 `PageAudio` 在进程内播，见第七节 |
 
 ---
 
@@ -218,7 +218,8 @@ isRunning = true
 try? activateAudioSession()      // 再设一次
 ```
 
-修完手机确实有声音了（用户确认）。
+修完手机确实有声音了（用户确认）。但**这只解决了「手机能听见」**，
+采集侧仍然是静音 —— 那是另一回事，见第七节。
 
 ---
 
@@ -273,13 +274,13 @@ window = mockWindow
 
 ---
 
-## 七、未解决：成片音轨是数字静音
+## 七、坑 6：成片音轨是数字静音
 
 ### 证据
 
 - 视频：884×1920、6.6 Mbps、20.7 秒、1278 帧 —— 全部正常
 - 音频：970 帧、正好铺满 20.8 秒（48kHz / 1024 帧每包），但 `volumedetect` 是 **−91 dB**
-- 手机扬声器确实有声音
+- 手机扬声器确实有声音（第四节修完之后）
 
 音频包数量与时长严丝合缝，说明 ReplayKit 真的在送音频，只是内容全是 0。
 
@@ -289,17 +290,47 @@ window = mockWindow
 原来那条 `testAudioAndVideoStartTogether` 的音频是 `memset 0` 的，所以查不出静音 ——
 顺手把 helper 改成写正弦。
 
-### 推断
+### 真因
 
-ReplayKit 的 `.audioApp` 拿不到 WKWebView 的媒体音频。WebKit 的音频在
-WebContent / GPU 进程渲染，不在 app 进程的音频 tap 上。
+**WKWebView 的媒体音是 WebKit 在 WebContent / GPU 进程里渲染的**，
+ReplayKit 的 `.audioApp` 只 tap 到 app 进程自己的音频，所以它送来的全是零。
+第四节把 `AVAudioSession` 要回来，只让「手机能听见」，并不能让 tap 看见。
 
-### 三条候选路
+### 修法：把声音搬进 app 进程
 
-1. **接受无声** —— 画面完全正确，演示够用
-2. **用 `AVPlayer` 在 app 内另播一路同源音频**（能被 tap 到），与 webview 画面手工对齐 ——
-   音画可能漂移
-3. **把播放器从 WKWebView 换成 `AVPlayer`** —— 放弃「HTML 页面包装 mp4」这个前提
+页面那边把 `<video>` 常静音，只留画面；声音由 `Sources/Flow/PageAudio.swift` 用
+`AVPlayer` 播同一份 mp4（不挂 layer，只出声）。进程内的音频走 app 的 `AVAudioSession`，
+这才落在 ReplayKit 的采集范围内。
+
+音画对齐靠页面报点：首帧真正上屏时，`requestVideoFrameCallback` 给出 `mediaTime`，
+原生侧按它 `seek` 之后再播（`mediaTime < 0.3` 就不 seek，省掉几十毫秒的 seek 延迟）。
+
+```js
+if (!startedPosted && !player.paused) {
+  startedPosted = true;
+  post('started', { mediaTime: metadata.mediaTime });
+}
+```
+
+副作用是顺带删掉了「自动播放被拒就静音」那套兜底 —— 画面本来就是静音的，
+`play()` 不会被策略拦，整个失败模式消失了。
+
+### 结果
+
+| 指标 | 修前 | 修后 |
+| --- | --- | --- |
+| 平均音量 | −91.0 dB | **−20.2 dB** |
+| 峰值 | −91.0 dB | **−2.2 dB** |
+| 音频码率 | 2.2 kbps（静音） | **125.5 kbps** |
+| 音轨起点 | — | 视频起点 +14.6 ms |
+| 时长 | 20.7 s | 20.11 s |
+
+`silencedetect` 在 −40 dB 阈值下找不到任何静音段，说明整条都有内容。
+
+### 教训
+
+**「播放成功」和「被采集到」是两件事。** 音频在哪个进程渲染，决定了谁能 tap 到它。
+遇到「有音轨但全是零」，先问「这份声音是谁在渲染」。
 
 ---
 

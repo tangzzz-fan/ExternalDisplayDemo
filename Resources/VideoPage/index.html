@@ -34,7 +34,7 @@
 </head>
 <body>
 <div id="stage">
-  <video id="player" playsinline webkit-playsinline preload="auto" src="video.mp4"></video>
+  <video id="player" playsinline webkit-playsinline preload="auto" muted src="video.mp4"></video>
 </div>
 <script>
 (function () {
@@ -84,9 +84,10 @@
     post('error', { code: code });
   });
 
-  // 静音兜底只做一次：一旦静音播放成功，后续都以静音状态跑完，
-  // 避免中途反复切换导致录进去的音频断续。
-  var mutedFallbackUsed = false;
+  // 画面常静音：声音由原生侧用 AVPlayer 在 app 进程内播（见 PageAudio.swift）。
+  // WKWebView 的媒体音在别的进程渲染，ReplayKit 采不到，录出来会是整条静音。
+  player.muted = true;
+
   var autoplay = false;
   var retries = 0;
 
@@ -101,7 +102,6 @@
       var name = String(err && err.name);
 
       // AbortError 是 seek / pause 打断了 play()，属于瞬时状态，稍后重试即可。
-      // 不能把它当成"自动播放被拒"，否则会静音兜底，录进去的视频就没声音了。
       if (name === 'AbortError' && retries < 20) {
         retries += 1;
         setTimeout(function () {
@@ -110,16 +110,7 @@
         return;
       }
 
-      if (mutedFallbackUsed) {
-        post('playfailed', { message: name });
-        return;
-      }
-      mutedFallbackUsed = true;
-      player.muted = true;
-      post('mutedfallback', { message: name });
-      player.play().catch(function (second) {
-        post('playfailed', { message: String(second && second.name) });
-      });
+      post('playfailed', { message: name });
     });
   }
 
@@ -140,9 +131,9 @@
         player.currentTime = 0;
       }
       reported = {};
-      mutedFallbackUsed = false;
       retries = 0;
       endPosted = false;
+      startedPosted = false;
       watchFrames();
     },
     duration: function () {
@@ -155,11 +146,18 @@
   });
 
   var endPosted = false;
+  var startedPosted = false;
 
   function watchFrames() {
     if (!player.requestVideoFrameCallback) { return; }
 
     player.requestVideoFrameCallback(function (now, metadata) {
+      // 首帧真正上屏时通知原生侧：声音按这个 mediaTime 起步，音画才对得上。
+      if (!startedPosted && !player.paused) {
+        startedPosted = true;
+        post('started', { mediaTime: metadata.mediaTime });
+      }
+
       if (!endPosted && player.duration > 0 && metadata.mediaTime >= player.duration - 0.08) {
         endPosted = true;
         post('ended', { duration: player.duration, mediaTime: metadata.mediaTime });

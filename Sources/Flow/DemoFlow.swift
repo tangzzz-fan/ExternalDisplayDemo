@@ -30,6 +30,7 @@ final class DemoFlow {
 
     @ObservationIgnored private let capture = ScreenCapture()
     @ObservationIgnored private let simulated = SimulatedCapture()
+    @ObservationIgnored private let pageAudio = PageAudio()
     @ObservationIgnored private var finishTask: Task<Void, Never>?
     @ObservationIgnored private var deadlineTask: Task<Void, Never>?
 
@@ -109,6 +110,7 @@ final class DemoFlow {
         deadlineTask?.cancel()
         deadlineTask = nil
         simulated.stop()
+        pageAudio.stop()
 
         if isCapturing, !isSimulatedCapture {
             capture.cancel()
@@ -148,6 +150,7 @@ final class DemoFlow {
         deadlineTask?.cancel()
         deadlineTask = nil
         simulated.stop()
+        pageAudio.stop()
         isCapturing = false
         statusText = "正在生成录制文件"
 
@@ -185,11 +188,12 @@ final class DemoFlow {
             if isCapturing {
                 statusText = isSimulatedCapture ? "模拟录制（本机无 ReplayKit）" : "录制中"
             }
+        case .started(let mediaTime):
+            guard phase == .capture, isCapturing else { return }
+            pageAudio.start(url: Self.bundledVideoURL(), from: mediaTime)
         case .ended:
             guard phase == .capture, isCapturing else { return }
             finishTask = Task { await finishCapture() }
-        case .mutedFallback:
-            errorText = "有声自动播放被系统拒绝，已改为静音播放"
         case .failed(let message):
             errorText = message
             statusText = "页面出错"
