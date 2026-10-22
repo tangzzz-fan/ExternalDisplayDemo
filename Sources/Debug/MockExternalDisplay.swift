@@ -22,9 +22,19 @@ final class MockExternalDisplay {
 
     static let shared = MockExternalDisplay()
 
-    /// 启动参数 `-mockExternalDisplay`。
+    /// DEBUG 构建默认挂载，`-noMockExternalDisplay` 可关掉。
+    ///
+    /// 早先是「必须带 `-mockExternalDisplay` 才生效」，但那样只有从命令行拉起才有替身屏，
+    /// 点图标进来看不到 —— 没接眼镜时等于整块外接屏都没了。
     static var isEnabled: Bool {
-        ProcessInfo.processInfo.arguments.contains("-mockExternalDisplay")
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-noMockExternalDisplay") { return false }
+        if arguments.contains("-mockExternalDisplay") { return true }
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
     }
 
     /// 绑定到手机端的开关；置 true 即挂载模拟外接屏，置 false 即收起。
@@ -51,9 +61,26 @@ final class MockExternalDisplay {
     /// 随时可查，所以不必往视图树里塞一个宿主 VC 专门去「登记」一个出来。
     func bootstrap() {
         guard Self.isEnabled else { return }
+        guard !ExternalDisplayMonitor.shared.attachments.contains(where: { $0.source == .physical }) else { return }
         guard let scene = Self.mainWindowScene else { return }
-        self.windowScene = scene
-        if !isVisible { isVisible = true }  // didSet → install()
+
+        // 窗口已经不在这个 scene 里（后台被系统拆掉、或 scene 被回收重建）时，
+        // 旧 window 会永远不显示。这时必须重建 —— 不能因为 isVisible 还是 true 就跳过，
+        // 否则替身屏会在某次前后台切换后彻底消失，只能手动点开关才回来。
+        if let window, window.windowScene !== scene {
+            window.isHidden = true
+            self.window = nil
+            ExternalDisplayMonitor.shared.detachMock()
+        }
+
+        windowScene = scene
+
+        if window == nil {
+            isVisible = true
+            install()
+        } else {
+            layout()
+        }
     }
 
     /// 主屏（`windowApplication` role）的 `UIWindowScene`。

@@ -41,6 +41,7 @@ struct ExternalDisplayDemoApp: App {
                     // `simctl` 没有触摸注入 API，没有这一步就没法脚本化地
                     // 逐状态截图核对下拉几何。无参数时是 no-op。
                     MockRemoteState.applyIfNeeded()
+                    MockDemoFlow.applyIfNeeded()
                 }
         }
         .onChange(of: scenePhase) { _, phase in

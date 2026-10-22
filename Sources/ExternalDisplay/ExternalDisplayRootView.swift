@@ -17,21 +17,16 @@ import SwiftUI
 /// `PassthroughWindow.hitTest` 恒返回 `nil`），SwiftUI 的 accessory 更是在 API 层面
 /// 就叫 `ExternalNonInteractiveAccessory`。
 ///
-/// 所以这个视图是**纯输出**的：它只读 `RemoteControl` 的共享状态，
-/// 滚动 / 下拉 / 缩放 / 光标全部由手机端的手势面写入。在这里加 `ScrollView`
-/// 或 `.gesture` 是无效的 —— 手势根本到不了这棵视图树。
+/// 所以这个视图是**纯输出**的：它只读 `RemoteControl` 与 `DemoFlow` 的共享状态，
+/// 滚动 / 缩放 / 光标由手机端的手势面写入，按钮的"点击"也由手机端判定 ——
+/// 这一屏只负责把光标悬停到的按钮画成高亮。
 ///
-/// ## 层次
+/// ## 三个页面
 /// ```
-/// backdrop                 纯黑 + 一行很暗的字，下拉时露出的就是它
-/// └ content                图案画布，1.6 倍视口高，随 scroll / pull 位移
-///   └ caption              标题与分辨率，贴在画布顶上，随内容滚走
-/// hud                      固定，右下角：时钟 + 读数
-/// ripple / cursor          固定，跟随手机端光标
+/// launcher  按钮页：图案画布当背景，按钮浮在正中，光标悬停即高亮
+/// capture   录制中：ReplayKit 的实时画面，左上角录制标记、右上角计时
+/// playback  回放：录制出来的 mp4 循环播放
 /// ```
-///
-/// 排版全部按画面短边等比缩放，因此同一份代码在 1080p 真外接屏、
-/// 4K 外接屏、以及模拟器的 letterbox 小窗口里都不会溢出或截断。
 struct ExternalDisplayRootView: View {
 
     /// 内容量出自己的**像素**尺寸后回调。
@@ -46,10 +41,12 @@ struct ExternalDisplayRootView: View {
 
     private let store = DisplayContentStore.shared
     private let remote = RemoteControl.shared
+    private let flow = DemoFlow.shared
 
     /// 轻点反馈的涟漪。
     @State private var rippleScale: CGFloat = 0.35
     @State private var rippleOpacity: Double = 0
+    @State private var isPulseOn = false
 
     /// 内容总高 / 视口高。滚动行程由它决定 —— 取 1.6 表示滚到底时
     /// 内容正好上移 0.6 个视口高，画布底部与视口底部对齐、不露黑边。
@@ -58,20 +55,21 @@ struct ExternalDisplayRootView: View {
     var body: some View {
         GeometryReader { geometry in
             let viewport = geometry.size
-            let metrics = ScrollMetrics(
-                viewport: viewport,
-                contentHeight: viewport.height * Self.contentHeightRatio,
-                inset: 0
-            )
 
             ZStack(alignment: .topLeading) {
-                backdrop(viewport)
-                content(viewport: viewport, metrics: metrics)
-                topScrim(viewport)
-                caption(viewport)
-                hud(viewport)
-                ripple(viewport)
-                cursor(viewport)
+                switch flow.phase {
+                case .launcher:
+                    launcherLayer(viewport)
+                case .capture:
+                    captureLayer(viewport)
+                case .playback:
+                    playbackLayer(viewport)
+                }
+
+                if flow.phase == .launcher {
+                    cursor(viewport)
+                    ripple(viewport)
+                }
             }
             // 内容容器刻意比视口高（它要能滚动），于是 ZStack 的尺寸会被撑到内容总高 ——
             // 而 `.frame` 默认是**居中**对齐，一旦 ZStack 比 frame 大，它就会被往上
@@ -109,6 +107,120 @@ struct ExternalDisplayRootView: View {
         onMetricsChange(pixelSize(for: viewport), displayScale)
     }
 
+    // MARK: - 按钮页
+
+    private func launcherLayer(_ viewport: CGSize) -> some View {
+        let metrics = ScrollMetrics(
+            viewport: viewport,
+            contentHeight: viewport.height * Self.contentHeightRatio,
+            inset: 0
+        )
+
+        return ZStack(alignment: .topLeading) {
+            content(viewport: viewport, metrics: metrics)
+            Color.black.opacity(0.5)
+            topScrim(viewport)
+            bottomScrim(viewport)
+
+            GlassesLauncherCard(
+                viewport: viewport,
+                isHighlighted: GlassesLauncherLayout.standard.hitTest(remote.pointer),
+                statusText: flow.statusText,
+                errorText: flow.errorText
+            )
+
+            hud(viewport)
+        }
+        .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
+    }
+
+    // MARK: - 录制中
+
+    private func captureLayer(_ viewport: CGSize) -> some View {
+        let base = min(viewport.width, viewport.height)
+
+        return ZStack(alignment: .topLeading) {
+            Color.black
+
+            LivePreviewView()
+                .frame(width: viewport.width, height: viewport.height)
+
+            HStack(spacing: base * 0.02) {
+                Circle()
+                    .fill(flow.isCapturing ? Color.red : Color.orange)
+                    .frame(width: base * 0.026, height: base * 0.026)
+                    .opacity(isPulseOn ? 0.3 : 1)
+
+                Text(captureTitle)
+                    .font(.system(size: base * 0.034, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+
+                Spacer(minLength: base * 0.04)
+
+                TimelineView(.periodic(from: flow.captureStartedAt ?? .now, by: 0.2)) { _ in
+                    Text(flow.isCapturing ? elapsedText : "00:00.0")
+                        .font(.system(size: base * 0.05, weight: .thin, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(flow.isCapturing ? Color.white : Color.white.opacity(0.35))
+                }
+            }
+            .padding(.horizontal, base * 0.05)
+            .padding(.top, base * 0.045)
+            .frame(width: viewport.width, alignment: .topLeading)
+            .shadow(color: .black.opacity(0.85), radius: base * 0.02)
+
+            Text("实时画面 · \(flow.statusText)")
+                .font(.system(size: base * 0.026, weight: .regular))
+                .foregroundStyle(.white.opacity(0.6))
+                .padding(base * 0.045)
+                .frame(width: viewport.width, height: viewport.height, alignment: .bottomLeading)
+                .shadow(color: .black.opacity(0.85), radius: base * 0.02)
+        }
+        .frame(width: viewport.width, height: viewport.height)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true)) {
+                isPulseOn = true
+            }
+        }
+    }
+
+    private var captureTitle: String {
+        guard flow.isCapturing else { return "准备录制" }
+        return flow.isSimulatedCapture ? "模拟录制" : "正在录制"
+    }
+
+    private var playbackCaption: String {
+        guard flow.recordedDuration > 0 else { return "录制结果 · 循环回放" }
+        return "录制结果 · \(DemoFlow.secondsText(flow.recordedDuration)) · 循环回放"
+    }
+
+    private var elapsedText: String {
+        let seconds = max(0, Date().timeIntervalSince(flow.captureStartedAt ?? Date()))
+        return String(format: "%02d:%04.1f", Int(seconds) / 60, seconds.truncatingRemainder(dividingBy: 60))
+    }
+
+    // MARK: - 回放
+
+    private func playbackLayer(_ viewport: CGSize) -> some View {
+        let base = min(viewport.width, viewport.height)
+
+        return ZStack(alignment: .bottomLeading) {
+            Color.black
+
+            if let url = flow.recordedURL {
+                RecordedVideoView(url: url)
+                    .frame(width: viewport.width, height: viewport.height)
+            }
+
+            Text(playbackCaption)
+                .font(.system(size: base * 0.028, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(base * 0.045)
+                .shadow(color: .black.opacity(0.8), radius: base * 0.02)
+        }
+        .frame(width: viewport.width, height: viewport.height)
+    }
+
     // MARK: - 底层
 
     /// 常驻在最底下的一层。内容被推走 / 滚到底之后露出来的就是它。
@@ -141,9 +253,6 @@ struct ExternalDisplayRootView: View {
     /// 一块比视口高的图案画布，随纵向三段位移。
     ///
     /// 位移取自 `ScrollMetrics`（滚动 / 下拉 / 上拉），它是纯几何，手机端只送归一化进度。
-    ///
-    /// 刻意**不做**横向位移：屏幕后面没有第二层内容可以露出来，
-    /// 推走之后只会留下一条黑边 —— 那不是"被推开"，看起来像没铺满。
     private func content(viewport: CGSize, metrics: ScrollMetrics) -> some View {
         let height = viewport.height * Self.contentHeightRatio
 
@@ -163,30 +272,22 @@ struct ExternalDisplayRootView: View {
     /// 浅色图案经过时标题会读不出来。
     private func topScrim(_ viewport: CGSize) -> some View {
         LinearGradient(
-            colors: [.black.opacity(0.72), .clear],
+            colors: [.black.opacity(0.78), .clear],
             startPoint: .top,
             endPoint: .bottom
         )
-        .frame(width: viewport.width, height: viewport.height * 0.3)
+        .frame(width: viewport.width, height: viewport.height * 0.34)
         .allowsHitTesting(false)
     }
 
-    /// 标题与分辨率。**固定**在左上角，不随内容滚动 ——
-    /// 画布滚走之后屏幕上仍要有一个"这是什么"的标识。
-    private func caption(_ viewport: CGSize) -> some View {
-        let base = min(viewport.width, viewport.height)
-        return VStack(alignment: .leading, spacing: base * 0.014) {
-            Text(store.caption)
-                .font(.system(size: base * 0.072, weight: .bold, design: .rounded))
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-
-            Text(resolutionText(for: viewport))
-                .font(.system(size: base * 0.036, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.7))
-        }
-        .padding(base * 0.055)
-        .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
+    private func bottomScrim(_ viewport: CGSize) -> some View {
+        LinearGradient(
+            colors: [.clear, .black.opacity(0.85)],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .frame(width: viewport.width, height: viewport.height * 0.4)
+        .frame(width: viewport.width, height: viewport.height, alignment: .bottom)
         .allowsHitTesting(false)
     }
 
@@ -197,32 +298,29 @@ struct ExternalDisplayRootView: View {
         return VStack(alignment: .trailing, spacing: base * 0.012) {
             TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
                 Text(timeline.date, format: .dateTime.hour().minute().second())
-                    .font(.system(size: base * 0.1, weight: .thin, design: .monospaced))
+                    .font(.system(size: base * 0.075, weight: .thin, design: .monospaced))
                     .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(.white.opacity(0.8))
             }
 
-            Text(readout)
-                .font(.system(size: base * 0.032, weight: .medium, design: .monospaced))
+            Text(readout(for: viewport))
+                .font(.system(size: base * 0.03, weight: .medium, design: .monospaced))
                 .monospacedDigit()
-                .foregroundStyle(.white.opacity(0.55))
+                .foregroundStyle(.white.opacity(0.5))
         }
-        .padding(base * 0.06)
+        .padding(base * 0.05)
         .frame(width: viewport.width, height: viewport.height, alignment: .bottomTrailing)
         .shadow(color: .black.opacity(0.6), radius: base * 0.02)
         .allowsHitTesting(false)
     }
 
-    private var readout: String {
+    private func readout(for viewport: CGSize) -> String {
         var parts = [
-            "滚动 \(Int(remote.scroll * 100))%",
-            "缩放 \(String(format: "%.2f", remote.zoom))×"
+            resolutionText(for: viewport),
+            "滚动 \(Int(remote.scroll * 100))%"
         ]
-        if remote.pull > 0 {
-            parts.append("下拉 \(Int(remote.pull * 100))%")
-        }
-        if remote.bottomPull > 0 {
-            parts.append("上拉 \(Int(remote.bottomPull * 100))%")
+        if remote.zoom > 1.001 {
+            parts.append("缩放 \(String(format: "%.2f", remote.zoom))×")
         }
         return parts.joined(separator: " · ")
     }

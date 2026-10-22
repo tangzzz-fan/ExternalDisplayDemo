@@ -14,25 +14,75 @@ struct PhoneRootView: View {
     private let monitor = ExternalDisplayMonitor.shared
     private let remote = RemoteControl.shared
     @Bindable private var mock = MockExternalDisplay.shared
+    @Bindable private var flow = DemoFlow.shared
 
     var body: some View {
         VStack(spacing: 0) {
             statusBar
             Divider()
 
-            GesturePad(
-                hints: [
-                    GesturePadHint(text: "单指移动 → 移动光标"),
-                    GesturePadHint(text: "双指上下 → 滚动 / 下拉 / 上拉"),
-                    GesturePadHint(text: "轻点 → 点击确认"),
-                    GesturePadHint(text: "双指捏合 → 缩放（模拟器按住 Option）", isSecondary: true)
-                ],
-                scrollGesture: .twoFinger,
-                onTap: { remote.tap() }
-            )
-            .padding(12)
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+
+                VStack(spacing: 14) {
+                    GesturePad(
+                        hints: [],
+                        scrollGesture: .twoFinger,
+                        onTap: {
+                            remote.tap()
+                            flow.activate(at: remote.pointer)
+                        }
+                    )
+                    .aspectRatio(padAspect, contentMode: .fit)
+                    .frame(maxWidth: 320)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.secondary.opacity(0.28), lineWidth: 1)
+                    )
+
+                    hintList
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 26)
+            }
         }
         .background(Color(.systemGroupedBackground))
+        .fullScreenCover(isPresented: $flow.isPagePresented) {
+            CaptureScreenView(flow: flow)
+                .interactiveDismissDisabled()
+        }
+        .onAppear {
+            if remote.pointer == nil {
+                remote.movePointer(to: GlassesLauncherLayout.standard.buttonCenter)
+            }
+        }
+    }
+
+    private var padAspect: CGFloat {
+        guard let size = monitor.attachments.first?.pixelSize, size.width > 0, size.height > 0 else {
+            return 16.0 / 9.0
+        }
+        return size.width / size.height
+    }
+
+    private var hintList: some View {
+        VStack(spacing: 6) {
+            ForEach(Array(hints.enumerated()), id: \.offset) { _, hint in
+                Text(hint.text)
+                    .font(.footnote)
+                    .foregroundStyle(hint.isSecondary ? Color.secondary.opacity(0.6) : Color.secondary)
+            }
+        }
+        .multilineTextAlignment(.center)
+    }
+
+    private var hints: [GesturePadHint] {
+        [
+            GesturePadHint(text: "单指在触摸板内移动 → 移动光标"),
+            GesturePadHint(text: "轻点 → 点击光标下的按钮"),
+            GesturePadHint(text: "双指上下 → 滚动背景图案"),
+            GesturePadHint(text: "双指捏合 → 缩放（模拟器按住 Option）", isSecondary: true)
+        ]
     }
 
     // MARK: - 状态栏
@@ -47,14 +97,28 @@ struct PhoneRootView: View {
                 Text(monitor.isConnected ? "外接屏已连接" : "未检测到外接屏")
                     .font(.subheadline.weight(.medium))
 
-                Text(detailText)
-                    .font(.caption.monospacedDigit())
+                if let attachment = monitor.attachments.first {
+                    Text(attachment.resolution)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Text(flow.statusText)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
 
             Spacer(minLength: 0)
+
+            if flow.phase == .playback {
+                Button("重新录制") { flow.restart() }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+            }
 
             if MockExternalDisplay.isEnabled {
                 Button {
@@ -70,14 +134,6 @@ struct PhoneRootView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(.bar)
-    }
-
-    /// 连接了就报分辨率，没连接就报最近一条事件 —— 一行里总有点可读的东西。
-    private var detailText: String {
-        if let attachment = monitor.attachments.first {
-            return "\(attachment.resolution) · \(remote.lastEvent)"
-        }
-        return remote.lastEvent
     }
 }
 

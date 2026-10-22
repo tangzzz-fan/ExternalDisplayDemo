@@ -21,6 +21,9 @@ targets:
     deploymentTarget: "17.0"
     sources:
       - path: Sources
+      - path: Resources/VideoPage
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: ExternalDisplayDemo
@@ -37,11 +40,25 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: ""
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
 
+  ExternalDisplayDemoTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests
+    dependencies:
+      - target: ExternalDisplayDemo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jove.externaldisplaydemo.tests
+        GENERATE_INFOPLIST_FILE: YES
+
 schemes:
   ExternalDisplayDemo:
     build:
       targets:
         ExternalDisplayDemo: all
+        ExternalDisplayDemoTests: [test]
     run:
       config: Debug
       commandLineArguments:
@@ -49,6 +66,8 @@ schemes:
         "-mockAirMouse": false
     test:
       config: Debug
+      targets:
+        - ExternalDisplayDemoTests
     profile:
       config: Release
     analyze:
