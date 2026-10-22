@@ -34,7 +34,7 @@ final class MockDisplayLayoutTests: XCTestCase {
 
     func testLandscapeBecomesBottomRightPIP() {
         let container = CGRect(x: 20, y: 60, width: 804, height: 270)
-        let rect = MockDisplayLayout.rect(in: container, aspect: aspect, edge: 16)
+        let rect = MockDisplayLayout.rect(in: container, aspect: aspect)
 
         XCTAssertEqual(rect.height, 270 * MockDisplayLayout.pipHeightRatio, accuracy: 0.01)
         XCTAssertEqual(rect.width / rect.height, aspect, accuracy: 0.001)
@@ -59,7 +59,7 @@ final class MockDisplayLayoutTests: XCTestCase {
     func testLandscapeClampsToContainerWidth() {
         // 超宽比 + 窄容器：按高度算出来的 PIP 会顶出右边界，必须按宽度收。
         let container = CGRect(x: 0, y: 0, width: 200, height: 190)
-        let rect = MockDisplayLayout.rect(in: container, aspect: 3, edge: 16)
+        let rect = MockDisplayLayout.rect(in: container, aspect: 3)
 
         XCTAssertLessThanOrEqual(rect.width, container.width - 32 + 0.01)
         XCTAssertEqual(rect.maxX, container.maxX - 16, accuracy: 0.01)

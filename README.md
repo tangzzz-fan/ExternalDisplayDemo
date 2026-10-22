@@ -162,7 +162,7 @@ if #available(iOS 27.0, *) {
 ExternaldisplayDemo/
 ├── project.yml                                    XcodeGen 配置（XcodeGen 2.46+）
 ├── Support/Info.plist                             scene manifest 在这里
-├── Resources/VideoPage/                           demo 站点：文字 + 视频，播放键触发录屏
+├── Resources/VideoPage/                           本地素材 video.mp4（只给模拟器替身喂帧；页面已换成远程站点）
 ├── docs/
 │   ├── recording-pipeline.md                      ★ 录屏链路（HTML → 采集 → 落盘/预览）的坑
 │   ├── tech-debt.md                               ★ 已实测但未解的问题（TD-001 起）
@@ -201,7 +201,6 @@ ExternaldisplayDemo/
     │   ├── SimulatedCapture.swift                 模拟器的替身帧源（只喂预览，不产出文件）
     │   ├── RecordingWriter.swift                  采样 → mp4（AVAssetWriter）
     │   ├── LivePreviewRelay.swift                 采样 → 外接屏显示层（跨线程中继）
-    │   ├── PageAudio.swift                        进程内播声音（WKWebView 的音 ReplayKit 采不到）
     │   └── GlassesLauncherLayout.swift            按钮命中判定（归一化矩形，手机侧算）
     └── Debug/
         ├── MockExternalDisplay.swift              模拟器替身（不参与真机链路）
@@ -334,9 +333,10 @@ SwiftUI 在 iOS 17 上**拿不到手指数量**：
 
 两条容易搞反的判断：
 
-- **判横屏用容器宽高比，不用 `UIDevice.orientation`**。后者在「手机横放但 app 仍按竖屏排版」
-  时会撒谎，而"容器比高更宽"正是横屏布局成立的充要条件。替身屏的摆法全在
-  `MockDisplayLayout` 里（纯几何，有单测）。
+- **两处判据各管各的，都不该用 `UIDevice.orientation`**（它在「手机横放但 app 仍按竖屏
+  排版」时会撒谎）：替身屏的摆法用**容器宽高比**（`MockDisplayLayout.isLandscape`，
+  纯几何、有单测）；手机端排版用 `verticalSizeClass`，因为它要回答的是
+  「还剩多少高度能留给手势面」。iPhone 上两者一致，iPad 分屏下可以不一致，各取所需。
 - **视频一律 fill（`resizeAspectFill` / `object-fit: cover`），两端同一口径**。素材是 1080×1920
   竖屏，铺进横屏容器时逐级放大、比例不符的边直接裁掉 —— 换来"不留黑边"，
   代价是画面上下的内容看不见。要保全部内容就改回 `.resizeAspect` / `contain`。

@@ -22,11 +22,14 @@ enum MockDisplayLayout {
         container.width > container.height
     }
 
-    static func rect(in container: CGRect, aspect: CGFloat, edge: CGFloat = 16) -> CGRect {
+    /// 距容器边缘的留白。
+    private static let edge: CGFloat = 16
+
+    static func rect(in container: CGRect, aspect: CGFloat) -> CGRect {
         guard container.width > 0, container.height > 0, aspect > 0 else { return container }
 
         return isLandscape(container)
-            ? pipRect(in: container, aspect: aspect, edge: edge)
+            ? pipRect(in: container, aspect: aspect)
             : centeredRect(in: container, aspect: aspect)
     }
 
@@ -46,7 +49,7 @@ enum MockDisplayLayout {
     }
 
     /// 横屏：右下角，按高度定尺寸。
-    private static func pipRect(in container: CGRect, aspect: CGFloat, edge: CGFloat) -> CGRect {
+    private static func pipRect(in container: CGRect, aspect: CGFloat) -> CGRect {
         var height = container.height * pipHeightRatio
         var width = height * aspect
 

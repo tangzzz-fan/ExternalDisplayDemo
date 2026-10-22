@@ -17,13 +17,6 @@ final class VideoPageController: NSObject {
 
     var onEvent: ((Event) -> Void)?
 
-    /// 当前页面是远程网站还是打包在 app 里的本地演示页。
-    ///
-    /// 这个区分不是洁癖：远程页面里 `<video>` 的音轨由 WebKit 在**别的进程**渲染，
-    /// ReplayKit 采不到；本地那份 `video.mp4` 又和它不是同一个素材，
-    /// 拿它出声只会音画全错。所以音频那条路只对本地页成立。
-    let isRemote = true
-
     /// 远程页面地址。取自站点自己的移动版，不带跟踪参数。
     static let remoteURL = URL(string: "https://www.bilibili.com/video/BV1xrnz6gEVD/")!
 
@@ -193,15 +186,6 @@ final class VideoPageController: NSObject {
         guard !didLoad else { return }
         didLoad = true
 
-        guard isRemote else {
-            guard let url = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "VideoPage") else {
-                onEvent?(.failed("找不到 VideoPage/index.html"))
-                return
-            }
-            webView?.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-            return
-        }
-
         var request = URLRequest(url: Self.remoteURL)
         request.timeoutInterval = 20
         // 用 Safari 的移动版 UA：WKWebView 默认 UA 会被站点当成"内置浏览器"，
@@ -225,16 +209,6 @@ final class VideoPageController: NSObject {
     /// 退出全屏，把页面还给用户。
     func endPresentation() {
         evaluate("window.__edBridge && window.__edBridge.exit();")
-    }
-
-    /// 启动失败：把页面还给用户，并说明原因。
-    func fail(_ message: String) {
-        endPresentation()
-        guard let data = try? JSONSerialization.data(
-            withJSONObject: message,
-            options: [.fragmentsAllowed]
-        ), let literal = String(data: data, encoding: .utf8) else { return }
-        evaluate("window.__page && window.__page.fail(\(literal));")
     }
 
     func reset() {

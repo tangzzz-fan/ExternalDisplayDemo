@@ -38,7 +38,6 @@ final class DemoFlow {
 
     @ObservationIgnored private let capture = ScreenCapture()
     @ObservationIgnored private let simulated = SimulatedCapture()
-    @ObservationIgnored private let pageAudio = PageAudio()
     @ObservationIgnored private var finishTask: Task<Void, Never>?
     @ObservationIgnored private var deadlineTask: Task<Void, Never>?
 
@@ -75,11 +74,13 @@ final class DemoFlow {
         }
 
         // 「点播放 = 切全屏」的落点：竖屏加载页面，用户一按站点的播放键，
-        // 这里就转横屏，随后把页面切成全屏。转屏必须排在 `capture.start()` 之前 ——
-        // ReplayKit 的缓冲尺寸在启动那一刻定死。
+        // 这里就转横屏、接着把页面切成全屏。两步都必须排在 `capture.start()` 之前：
+        // 转屏是因为 ReplayKit 的缓冲尺寸在启动那一刻定死；全屏是因为录屏授权弹窗
+        // 可能要等好几秒，那几秒里若还是竖屏的站点页，会被原样录进成片开头。
         statusText = "正在切换到全屏"
         let turned = await rotateToLandscape()
         lockedOrientationMask = turned ? .landscape : .portrait
+        page.beginPresentation()
 
         statusText = "正在启动录屏"
 
@@ -110,18 +111,14 @@ final class DemoFlow {
         captureStartedAt = .now
         statusText = isSimulatedCapture ? "模拟录制（本机无 ReplayKit）" : "录制中"
 
-        // 采集已经在跑：把远程页面切成全屏（视频提到顶层铺满）。
-        // 远程素材的播放由站点自己负责，这里只接管"怎么显示"。
-        page.beginPresentation()
-
         scheduleDeadlineStop()
     }
 
-    /// 启动失败：页面按钮要还回去，手机状态栏与错误条共用同一句话。
+    /// 启动失败：页面要从全屏退回站点页，手机状态栏与错误条共用同一句话。
     private func failCapture(_ message: String) {
         errorText = message
         statusText = "录屏启动失败"
-        page.fail(message)
+        page.endPresentation()
     }
 
     /// 页面还没报出素材时长时的兜底上限。
@@ -153,8 +150,6 @@ final class DemoFlow {
         deadlineTask?.cancel()
         deadlineTask = nil
         simulated.stop()
-        pageAudio.stop()
-
         if isCapturing, !isSimulatedCapture {
             capture.cancel()
         }
@@ -179,12 +174,6 @@ final class DemoFlow {
         statusText = "把光标移到按钮上，轻点手机屏幕"
     }
 
-    private static var mainScene: UIWindowScene? {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.session.role == .windowApplication }
-    }
-
     /// 把界面转到横屏，并且**等到真的转完**才返回。
     ///
     /// `requestGeometryUpdate` 在真机上会偶发被静默丢弃 —— 既不转、`errorHandler`
@@ -195,7 +184,7 @@ final class DemoFlow {
     /// 此时调用方按竖屏继续，至于"为什么没转"留给控制台。
     @discardableResult
     private func rotateToLandscape() async -> Bool {
-        guard let scene = Self.mainScene else { return false }
+        guard let scene = UIWindowScene.main else { return false }
         if scene.interfaceOrientation.isLandscape { return true }
 
         for _ in 0..<2 {
@@ -242,7 +231,6 @@ final class DemoFlow {
         deadlineTask?.cancel()
         deadlineTask = nil
         simulated.stop()
-        pageAudio.stop()
         isCapturing = false
         statusText = "正在生成录制文件"
 
@@ -290,12 +278,9 @@ final class DemoFlow {
             #if DEBUG
             print(String(format: "[Flow] started mediaTime=%.3f", mediaTime))
             #endif
-            // 远程页面里音轨由 WebKit 在别的进程渲染，ReplayKit 采不到；
-            // 而本地那份 `video.mp4` 与远程素材根本不是同一个东西，
-            // 拿它出声只会音画全错。所以进程内播音频只对本地页成立。
-            if !page.isRemote {
-                pageAudio.start(url: Self.bundledVideoURL(), from: mediaTime)
-            }
+            // 这里**刻意不出声**：站点音轨由 WebKit 在别的进程渲染，ReplayKit 采不到；
+            // 而本地那份 `video.mp4` 与远程素材不是同一个东西，播它只会音画全错。
+            // 宁可静音，不要错位。见 docs/tech-debt.md TD-001。
         case .ended:
             guard phase == .capture, isCapturing else { return }
             finishTask = Task { await finishCapture() }
@@ -306,7 +291,7 @@ final class DemoFlow {
         case .failed(let message):
             errorText = message
             statusText = "页面出错"
-            page.fail(message)
+            page.endPresentation()
         }
     }
 

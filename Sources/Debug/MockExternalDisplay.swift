@@ -52,6 +52,13 @@ final class MockExternalDisplay {
     /// 替身窗口假装的屏幕缩放比（模拟一块 3x 的外接屏）。
     private static let scale: CGFloat = 3
 
+    /// 替身屏假装的**像素尺寸**。
+    ///
+    /// 刻意写成常量，不按窗口大小推：窗口只是它在手机屏上的缩略摆放，横屏缩成 PIP 之后
+    /// 按窗口算会得到 631 × 355 这类数，手机端的分辨率读数与手势面比例都会跟着抖 ——
+    /// 而"眼镜屏有多大"根本不该随预览窗口怎么摆而变。
+    private static let simulatedPixelSize = CGSize(width: 1920, height: 1080)
+
     private init() {}
 
     // MARK: - Lifecycle
@@ -107,11 +114,7 @@ final class MockExternalDisplay {
     }
 
     /// 主屏（`windowApplication` role）的 `UIWindowScene`。
-    static var mainWindowScene: UIWindowScene? {
-        UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.session.role == .windowApplication }
-    }
+    static var mainWindowScene: UIWindowScene? { UIWindowScene.main }
 
     /// 手机 scene 断开时调用，保证不留悬挂的 window。
     func reset() {
@@ -171,7 +174,7 @@ final class MockExternalDisplay {
         window.frame = rect
 
         ExternalDisplayMonitor.shared.attachMock(
-            pixelSize: CGSize(width: rect.width * Self.scale, height: rect.height * Self.scale),
+            pixelSize: Self.simulatedPixelSize,
             nativeScale: Self.scale
         )
     }
