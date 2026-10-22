@@ -10,11 +10,21 @@ struct VideoPageView: UIViewRepresentable {
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.add(controller, name: "page")
+        // 远程页面没有原生钩子，事件与全屏都靠这份注入脚本。
+        // 所有 frame 都注入：站点把播放器放进 iframe 时主 frame 那份抓不到 `<video>`。
+        configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: VideoPageController.bridgeScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false
+            )
+        )
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = controller
         webView.isOpaque = false
         webView.backgroundColor = .black
-        // 站点页是「文字 + 视频」，要能滚；全屏播放时页面自己把 overflow 关掉。
+        // 页面本身要能滚（站点正文），全屏播放时由注入样式关掉 overflow。
         webView.scrollView.isScrollEnabled = true
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
@@ -27,6 +37,7 @@ struct VideoPageView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     static func dismantleUIView(_ uiView: WKWebView, coordinator: ()) {
+        uiView.navigationDelegate = nil
         uiView.configuration.userContentController.removeScriptMessageHandler(forName: "page")
         uiView.stopLoading()
     }

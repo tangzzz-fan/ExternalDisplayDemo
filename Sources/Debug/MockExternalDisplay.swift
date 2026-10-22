@@ -47,6 +47,7 @@ final class MockExternalDisplay {
 
     @ObservationIgnored private weak var windowScene: UIWindowScene?
     @ObservationIgnored private var window: UIWindow?
+    @ObservationIgnored private var orientationObserver: NSObjectProtocol?
 
     /// 替身窗口假装的屏幕缩放比（模拟一块 3x 的外接屏）。
     private static let scale: CGFloat = 3
@@ -74,12 +75,34 @@ final class MockExternalDisplay {
         }
 
         windowScene = scene
+        startObservingOrientation()
 
         if window == nil {
             isVisible = true
             install()
         } else {
             layout()
+        }
+    }
+
+    /// 手机转屏后必须重排替身窗口。
+    ///
+    /// 旋转并不会改替身窗口自己的 `bounds`（它是我们钉死的固定尺寸），所以
+    /// `layoutSubviews` 不会因为转屏而触发 —— 只能从方向通知这一侧驱动。
+    /// 另外这里**不**用 `UIDevice.orientation` 做判据：真正决定摆法的是容器宽高比，
+    /// 见 `MockDisplayLayout.isLandscape`。
+    private func startObservingOrientation() {
+        guard orientationObserver == nil else { return }
+
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        orientationObserver = NotificationCenter.default.addObserver(
+            forName: UIDevice.orientationDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // 用 Task 而不是就地改：转屏通知落在旋转动画刚开始的时候，
+            // 此时 `windowScene.coordinateSpace` 还是旧尺寸，读到的会是上一态的 rect。
+            Task { @MainActor in self?.layout() }
         }
     }
 
@@ -95,6 +118,13 @@ final class MockExternalDisplay {
         window?.isHidden = true
         window = nil
         windowScene = nil
+
+        if let orientationObserver {
+            NotificationCenter.default.removeObserver(orientationObserver)
+            self.orientationObserver = nil
+            UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        }
+
         ExternalDisplayMonitor.shared.detachMock()
         if isVisible { isVisible = false }
     }
@@ -121,16 +151,23 @@ final class MockExternalDisplay {
         layout()
     }
 
-    private func layout() {
+    /// 按当前容器尺寸重新摆放。
+    ///
+    /// 由两个来源驱动：转屏通知，以及手机端根视图尺寸变化（`ExternalDisplayDemoApp`
+    /// 的 background 里挂着）。两道都要 —— 转屏通知可能早于 `windowScene.coordinateSpace`
+    /// 换尺寸，那一次会算出旧 rect 被下面的幂等判断挡掉，靠第二道兜回来。
+    func layout() {
         guard let window, let windowScene else { return }
 
         let container = windowScene.coordinateSpace.bounds
         guard container.width > 0, container.height > 0 else { return }
 
-        let rect = Self.letterboxedRect(
+        let rect = MockDisplayLayout.rect(
             in: container.insetBy(dx: 20, dy: 60),
             aspect: Self.aspectRatio
         )
+        guard rect != window.frame else { return }
+
         window.frame = rect
 
         ExternalDisplayMonitor.shared.attachMock(
@@ -146,22 +183,6 @@ final class MockExternalDisplay {
     }
 
     // MARK: - Helpers
-
-    /// 在容器内按给定宽高比居中摆放，多出来的方向留黑边。
-    ///
-    /// 窗口是**宽度受限**的：16:9 在 362pt 宽的可视区里只有 204pt 高，
-    /// 远小于可用的竖向空间，所以它总是落在容器正中。
-    private static func letterboxedRect(in container: CGRect, aspect: CGFloat) -> CGRect {
-        guard container.width > 0, container.height > 0, aspect > 0 else { return container }
-
-        if container.width / container.height > aspect {
-            let width = container.height * aspect
-            return CGRect(x: container.midX - width / 2, y: container.minY, width: width, height: container.height)
-        } else {
-            let height = container.width / aspect
-            return CGRect(x: container.minX, y: container.midY - height / 2, width: container.width, height: height)
-        }
-    }
 
     /// 替身窗口假装的宽高比。缺省 `16:9`，可用 `-mockExternalDisplayAspect` 改。
     private static var aspectRatio: CGFloat { parseAspect() ?? 16.0 / 9.0 }

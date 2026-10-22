@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 纯 SwiftUI 生命周期的入口。
 ///
@@ -25,6 +26,9 @@ import SwiftUI
 @main
 struct ExternalDisplayDemoApp: App {
 
+    /// 录制期间锁方向的落点（SwiftUI 的 App 没有方向声明口，只能走 AppDelegate）。
+    @UIApplicationDelegateAdaptor(OrientationLock.self) private var orientationLock
+
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -33,6 +37,16 @@ struct ExternalDisplayDemoApp: App {
                 // iOS 27 起外接屏 scene 必须靠 accessory 注册才会连上；
                 // iOS 17~26 是 no-op（那条路靠 Info.plist 自动连接）。
                 .externalDisplaySceneAccessory()
+                // 转屏时手机端根视图尺寸必然变一次，借此驱动替身窗口重排。
+                // 只靠转屏通知不够：那条通知可能早于 scene 坐标空间换尺寸。
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear
+                            .onChange(of: proxy.size) { _, _ in
+                                MockExternalDisplay.shared.layout()
+                            }
+                    }
+                }
                 .onAppear {
                     // 首次挂载就走一次，不依赖 scenePhase 的初始跳变。
                     MockExternalDisplay.shared.bootstrap()

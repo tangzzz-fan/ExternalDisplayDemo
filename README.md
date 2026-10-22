@@ -9,7 +9,7 @@
 - Deployment target：**iOS 17.0**
 - Bundle ID：`com.jove.externaldisplaydemo`
 - 手机端与外接屏均为 SwiftUI，接入层为 UIKit（scene + window）
-- 28 个源文件
+- 28 个源文件 → 现在 **30 个**（横屏改造新增 `MockDisplayLayout` 与 `OrientationLock`）
 
 ---
 
@@ -165,6 +165,7 @@ ExternaldisplayDemo/
 ├── Resources/VideoPage/                           demo 站点：文字 + 视频，播放键触发录屏
 ├── docs/
 │   ├── recording-pipeline.md                      ★ 录屏链路（HTML → 采集 → 落盘/预览）的坑
+│   ├── tech-debt.md                               ★ 已实测但未解的问题（TD-001 起）
 │   ├── mock-external-display.md                   -mockExternalDisplay 的原理
 │   ├── external-display-screenshot.md             外接屏内容怎么截图（搬移→抓屏→裁切→探针）
 │   ├── scroll-feel.md                             上下滑动为什么跟手（体感角度）
@@ -174,7 +175,8 @@ ExternaldisplayDemo/
 └── Sources/
     ├── App/
     │   ├── ExternalDisplayDemoApp.swift           @main（SwiftUI App）+ accessory 声明
-    │   ├── PhoneRootView.swift                    状态栏 + 整块手势面
+    │   ├── OrientationLock.swift                  录制期间锁方向的 AppDelegate 落点
+    │   ├── PhoneRootView.swift                    状态栏 + 整块手势面（竖屏/横屏两套排法）
     │   ├── GesturePad.swift                       ★ 手势采集面
     │   └── TouchSurface.swift                     ★ UIKit 触摸层（唯一能读到手指数量的地方）
     ├── Core/
@@ -203,6 +205,7 @@ ExternaldisplayDemo/
     │   └── GlassesLauncherLayout.swift            按钮命中判定（归一化矩形，手机侧算）
     └── Debug/
         ├── MockExternalDisplay.swift              模拟器替身（不参与真机链路）
+        ├── MockDisplayLayout.swift                替身屏的竖屏居中 / 横屏 PIP 摆法（纯几何）
         ├── MockRemoteState.swift                  从启动参数预置视口状态，供截图验证
         └── MockDemoFlow.swift                     从启动参数跑一遍演示流程，供截图验证
 ```
@@ -307,6 +310,84 @@ SwiftUI 在 iOS 17 上**拿不到手指数量**：
 - **`.frame()` 不指定对齐会居中**。内容比视口高时，`.frame(width:height:)` 默认居中会
   把内容上移半个差值 —— 表现是「滚动起点就少了一截」。必须写 `alignment: .topLeading`。
 
+### 横屏：点播放自动转，眼镜屏不转
+
+转屏不是等用户手动转 —— 点播放键后 `DemoFlow.rotateToLandscape()` 主动把界面转到
+横屏，**并且等真的转完**才开始采集。顺序不能反：
+
+```
+点播放 → requestGeometryUpdate(.landscapeRight) → 轮询到 interfaceOrientation 变横 → capture.start()
+```
+
+`ReplayKit` 的缓冲尺寸在 `startCapture` 那一刻定死，一条轨道又只有一个 transform，
+所以「先录后转」会把画面 90° 塞进竖缓冲，而且转屏前后两种朝向没法共存。
+`requestGeometryUpdate` 在真机上会**偶发被静默丢弃**（既不转、errhandler 也不回调），
+所以是「轮询确认 + 失败重试两轮 + 超时就按竖屏继续」，不能发完就等。
+
+横屏只改**手机端**的排版，眼镜屏那条链路一个参数都不动。三块内容的实际变化：
+
+| | 竖屏 | 横屏 |
+| --- | --- | --- |
+| 手机屏 | 9:19.5，手势面竖排居中 | 2.17:1，手势面改横排（高度才是瓶颈） |
+| 替身屏 | 宽度顶满的居中宽条 | 右下角 PIP，高度取可用高的 42% |
+| 眼镜屏 | 16:9 横向 | **完全不变**：尺寸、内容、光标位置一模一样 |
+
+两条容易搞反的判断：
+
+- **判横屏用容器宽高比，不用 `UIDevice.orientation`**。后者在「手机横放但 app 仍按竖屏排版」
+  时会撒谎，而"容器比高更宽"正是横屏布局成立的充要条件。替身屏的摆法全在
+  `MockDisplayLayout` 里（纯几何，有单测）。
+- **视频一律 fill（`resizeAspectFill` / `object-fit: cover`），两端同一口径**。素材是 1080×1920
+  竖屏，铺进横屏容器时逐级放大、比例不符的边直接裁掉 —— 换来"不留黑边"，
+  代价是画面上下的内容看不见。要保全部内容就改回 `.resizeAspect` / `contain`。
+
+网络位置之外还有一条硬约束：**录制期间不允许转屏**。`RecordingWriter` 按第一帧尺寸建
+`AVAssetWriter`，之后每帧都要求同尺寸；中途转屏时 ReplayKit 送来的画面宽高互换，
+`append` 直接失败、整段录制作废。方向由 `DemoFlow.lockedOrientationMask` 钉在开录那一刻，
+落点是 `OrientationLock`（`AppDelegate` 的 `supportedInterfaceOrientationsFor`）。
+
+**实测（iPhone 16 Pro，2026-10-22 23:50）**：自动转横屏成功，录制 31.1 秒（撞到 30 秒上限），
+成片是横向的，替身屏与眼镜屏按 **fill** 铺满、不留黑边。
+
+转横屏对"眼镜屏能看清多少"是有意义的：竖屏帧是 0.46 : 1，fill 进 16:9 要左右裁掉 74%，
+等于把手机竖屏画面切掉大半；横屏帧 2.17 : 1 只需裁掉 18%。同一个 9:16 素材，
+在竖屏帧里只能占宽度的一小条，在横屏帧里能占满高度 —— **所以转横屏真正改善的是
+"录进去的那块画"的构图，不是让远端素材本身变大**。
+
+### 远程页面：B 站视频页（不再是本地素材）
+
+页面源从打包的 `Resources/VideoPage/index.html` 换成一个真实站点
+（`https://www.bilibili.com/video/BV1xrnz6gEVD/`）。这带来五个必须接受的后果：
+
+| | 本地页 | 远程站点 |
+| --- | --- | --- |
+| 事件来源 | 页面自己 `postMessage` | **注入脚本**盯 `<video>` |
+| 播放键 | 我们自己的按钮 | 站点的播放器，只能事后收 `play` |
+| 全屏 | 页面 CSS 的 `body.playing` | 注入 `html.ed-fullscreen`，把 `<video>` 提到顶层 |
+| 音频 | 页面静音 + 进程内播同一份 mp4 | **采不到，成片无声** |
+| 时长 | 素材 20 秒，`ended` 必到 | 可能几十分钟，必须封顶 |
+
+四条实现要点：
+
+1. **注入桥**（`VideoPageController.bridgeScript`）：`WKUserScript` 注入到所有 frame，
+   盯 `play` / `playing` / `ended` / `loadedmetadata` / `error`。站点是 SPA，`<video>`
+   后插入，所以 `MutationObserver` 与每 600ms 扫描一起上。
+   **不能**在 `play` 里 `pause()` 等原生启动采集 —— 站点播放器会把外部暂停当成用户操作，
+   再 `play()` 未必接得上。代价是成片开头少掉采集启动的零点几秒。
+2. **全屏靠注入样式**：给 `<html>` 挂 `ed-fullscreen`，把 `<video>` 改成 `fixed` +
+   `100vw/100vh` + `object-fit: cover`。站点的控制栏不跟着走 —— 录制只要画面。
+3. **音频只能丢**：站点音轨由 WebKit 在别的进程渲染，ReplayKit 采不到；本地那份
+   `video.mp4` 又不是同一个素材，拿它出声只会音画全错。`PageAudio` 只在本地页模式启用。
+   **已实测**（同机同链路，只换页面源）：本地页成片 mean −20.2 dB / max −2.6 dB，
+   远程页成片 mean −91.0 dB / max −91.0 dB —— 有音轨、时长也对，但采样全是 0。
+   别用 `ffprobe` 看到 AAC 轨就以为没事。详见 [`docs/tech-debt.md`](docs/tech-debt.md) TD-001。
+4. **录制必须封顶**（`DemoFlow.maxCaptureLength = 30`）：远程视频动辄几十分钟，
+   不封顶就是一次点击录到存储写满、界面也回不来。
+
+站点在 WebView 里会弹「未能成功跳转客户端 / 下载哔哩哔哩 App」引导层，注入脚本按文案
+定位后整层隐藏 —— 否则它会被录进成片。未登录状态下站点只给低清晰度，画面放大会糊，
+这是站点侧限制，不是渲染问题。
+
 ---
 
 ## 五、运行
@@ -403,6 +484,12 @@ iOS 27 系统根本不给外接屏 scene → 只剩镜像）。所以「外接�
 21. **`DisplayPatternCanvas` 这类 `TimelineView` + `Canvas` 的视图不吃"比父级更大"的 frame** →
     想靠"画布比视口宽"来做横向位移时，`Canvas` 仍按父级建议的尺寸绘制，
     结果推开之后露出的是黑边。要么让背景层有真实内容可露，要么不做这条轴。
+22. **录制中途转屏** → ReplayKit 送来的帧宽高互换，`RecordingWriter` 按首帧尺寸建好的
+    writer 会拒收，整段录制作废，报错只有一句「视频帧写入被拒绝」。录制期间方向由
+    `DemoFlow.lockedOrientationMask` 钉住，见第四节横屏小节。
+23. **替身屏在转屏后停在旧位置** → 旋转**不会**改替身窗口自己的 `bounds`（它是钉死的固定
+    尺寸），`layoutSubviews` 根本不会触发。必须从外部驱动：方向通知 + 手机端根视图尺寸
+    变化，两条都要（前者可能早于 `windowScene.coordinateSpace` 换尺寸）。
 
 ---
 

@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Observation
+import UIKit
 
 @MainActor
 @Observable
@@ -25,6 +26,13 @@ final class DemoFlow {
     private(set) var errorText: String?
 
     var isPagePresented = false
+
+    /// 录制期间锁死的方向；`nil` 表示不限制。
+    ///
+    /// 不是为了体验，是硬约束：`RecordingWriter` 拿**第一帧**的尺寸建 `AVAssetWriter`，
+    /// 之后每一帧都必须同尺寸。录制中途转屏会让 ReplayKit 送来的画面宽高互换，
+    /// 后续 `append` 直接失败 —— 整段录制作废，而报错只有"视频帧写入被拒绝"一句。
+    private(set) var lockedOrientationMask: UIInterfaceOrientationMask?
 
     let page = VideoPageController()
 
@@ -60,10 +68,18 @@ final class DemoFlow {
         errorText = nil
         statusText = "等待页面就绪"
 
-        guard await page.waitUntilReady() else {
-            failCapture("HTML 页面没有在 6 秒内就绪")
+        // 页面是远程站点，加载比本地 HTML 慢得多，别用 6 秒那个默认值。
+        guard await page.waitUntilReady(timeout: .seconds(15)) else {
+            failCapture("页面 15 秒内没有加载完")
             return
         }
+
+        // 「点播放 = 切全屏」的落点：竖屏加载页面，用户一按站点的播放键，
+        // 这里就转横屏，随后把页面切成全屏。转屏必须排在 `capture.start()` 之前 ——
+        // ReplayKit 的缓冲尺寸在启动那一刻定死。
+        statusText = "正在切换到全屏"
+        let turned = await rotateToLandscape()
+        lockedOrientationMask = turned ? .landscape : .portrait
 
         statusText = "正在启动录屏"
 
@@ -94,7 +110,9 @@ final class DemoFlow {
         captureStartedAt = .now
         statusText = isSimulatedCapture ? "模拟录制（本机无 ReplayKit）" : "录制中"
 
-        page.beginPlayback()
+        // 采集已经在跑：把远程页面切成全屏（视频提到顶层铺满）。
+        // 远程素材的播放由站点自己负责，这里只接管"怎么显示"。
+        page.beginPresentation()
 
         scheduleDeadlineStop()
     }
@@ -112,9 +130,16 @@ final class DemoFlow {
     /// 用它当正常时长会把 20 秒的片子截在 12 秒（旧值就是 12）。
     private static let unknownDurationLimit: Double = 60
 
+    /// 单次录制的硬上限。
+    ///
+    /// 本地素材 20 秒，靠 `ended` 收工没有问题；换成远程站点之后视频可能是几十分钟 ——
+    /// 一次点击就录到存储写满、界面也回不来。这里按时长和上限取小，到点就收尾。
+    private static let maxCaptureLength: Double = 30
+
     private func scheduleDeadlineStop() {
         deadlineTask?.cancel()
-        let limit = videoDuration > 0 ? videoDuration + 1.2 : Self.unknownDurationLimit
+        let byContent = videoDuration > 0 ? videoDuration + 1.2 : Self.unknownDurationLimit
+        let limit = min(byContent, Self.maxCaptureLength)
         deadlineTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(limit))
             guard !Task.isCancelled else { return }
@@ -137,6 +162,7 @@ final class DemoFlow {
         isCapturing = false
         isSimulatedCapture = false
         captureStartedAt = nil
+        unlockOrientation()
         page.reset()
 
         isPagePresented = false
@@ -146,10 +172,58 @@ final class DemoFlow {
 
     func restart() {
         guard phase == .playback else { return }
+        unlockOrientation()
         recordedURL = nil
         recordedDuration = 0
         phase = .launcher
         statusText = "把光标移到按钮上，轻点手机屏幕"
+    }
+
+    private static var mainScene: UIWindowScene? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.session.role == .windowApplication }
+    }
+
+    /// 把界面转到横屏，并且**等到真的转完**才返回。
+    ///
+    /// `requestGeometryUpdate` 在真机上会偶发被静默丢弃 —— 既不转、`errorHandler`
+    /// 也不回调（旧记录里探针确认过 mask 与 supported 全对，仍然不转）。
+    /// 所以不能"发完就等"，只能轮询窗口方向确认，且失败一次要重试。
+    ///
+    /// 两轮都没成也照样返回 false：卡在这里转不出去，比录成竖的更糟。
+    /// 此时调用方按竖屏继续，至于"为什么没转"留给控制台。
+    @discardableResult
+    private func rotateToLandscape() async -> Bool {
+        guard let scene = Self.mainScene else { return false }
+        if scene.interfaceOrientation.isLandscape { return true }
+
+        for _ in 0..<2 {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { error in
+                #if DEBUG
+                print("[Flow] requestGeometryUpdate 被拒: \(error.localizedDescription)")
+                #endif
+            }
+
+            if await waitUntilLandscape(scene) { return true }
+        }
+
+        #if DEBUG
+        print("[Flow] 两轮都没转到横屏，按竖屏继续录制")
+        #endif
+        return false
+    }
+
+    private func waitUntilLandscape(_ scene: UIWindowScene) async -> Bool {
+        for _ in 0..<18 {
+            if scene.interfaceOrientation.isLandscape { return true }
+            try? await Task.sleep(for: .milliseconds(70))
+        }
+        return scene.interfaceOrientation.isLandscape
+    }
+
+    private func unlockOrientation() {
+        lockedOrientationMask = nil
     }
 
     static func secondsText(_ seconds: Double) -> String {
@@ -190,6 +264,7 @@ final class DemoFlow {
 
         isSimulatedCapture = false
         captureStartedAt = nil
+        unlockOrientation()
         page.reset()
         isPagePresented = false
     }
@@ -215,7 +290,12 @@ final class DemoFlow {
             #if DEBUG
             print(String(format: "[Flow] started mediaTime=%.3f", mediaTime))
             #endif
-            pageAudio.start(url: Self.bundledVideoURL(), from: mediaTime)
+            // 远程页面里音轨由 WebKit 在别的进程渲染，ReplayKit 采不到；
+            // 而本地那份 `video.mp4` 与远程素材根本不是同一个东西，
+            // 拿它出声只会音画全错。所以进程内播音频只对本地页成立。
+            if !page.isRemote {
+                pageAudio.start(url: Self.bundledVideoURL(), from: mediaTime)
+            }
         case .ended:
             guard phase == .capture, isCapturing else { return }
             finishTask = Task { await finishCapture() }

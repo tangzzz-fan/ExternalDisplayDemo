@@ -20,7 +20,8 @@ struct LivePreviewView: UIViewRepresentable {
 
 /// 承载 `AVSampleBufferDisplayLayer` 的容器。
 ///
-/// 采样按原样送进来：不旋转、不裁切，装不下的地方留黑边。
+/// 采样按原样送进来：不旋转，但**按 fill 铺满**（比例不符的边被裁掉）。
+/// 录制期间它显示什么，成片里就是什么。
 final class PreviewContainerView: UIView {
 
     override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
@@ -32,7 +33,8 @@ final class PreviewContainerView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
-        displayLayer.videoGravity = .resizeAspect
+        // 与 `RecordedVideoView` 同一口径：fill（铺满、超出裁掉），两侧不留黑边。
+        displayLayer.videoGravity = .resizeAspectFill
         displayLayer.backgroundColor = UIColor.black.cgColor
     }
 

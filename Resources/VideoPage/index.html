@@ -280,6 +280,22 @@
   .hint[hidden] { display: none; }
   .hint.is-error { border-color: rgba(255, 77, 61, .5); color: #ffb4ad; }
 
+  /* ── 横屏 ─────────────────────────────────────────── */
+  /* 横过来之后纵向只剩一百多点，4:5 的卡片按宽度撑满就会顶出屏幕、把播放键推到
+     视口外面。这里改成按高度定尺寸（width: auto 才能让 aspect-ratio 反算宽度）。
+     只作用于**没进全屏播放**的时候 —— 全屏那条规则用 inset: 0 定位，
+     再加一个 height 会把它从固定定位里拽出来。 */
+  @media (orientation: landscape) {
+    #site { max-width: 680px; }
+
+    body:not(.playing) .player {
+      height: 56vh;
+      width: auto;
+      aspect-ratio: 4 / 5;
+      margin: 0 auto;
+    }
+  }
+
   /* ── 全屏播放（录制开始后） ───────────────────────── */
   body.playing { overflow: hidden; }
 
@@ -302,8 +318,9 @@
     box-shadow: none;
   }
 
-  /* 全屏播放：素材本来就是 9:16，装进去就行，裁了反而丢画面。 */
-  body.playing #player { object-fit: contain; }
+  /* 全屏播放：按 fill 铺满（cover），比例不符的上下/左右被裁掉。
+     与眼镜屏侧（`resizeAspectFill`）同一口径 —— 两端都是"铺满不留黑边"。 */
+  body.playing #player { object-fit: cover; }
   body.playing .scrim,
   body.playing .play-button,
   body.playing .badge { display: none; }

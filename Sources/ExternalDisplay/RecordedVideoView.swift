@@ -31,7 +31,9 @@ final class PlayerContainerView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
-        playerLayer.videoGravity = .resizeAspect
+        // fill：录进来的帧比例未必等于眼镜屏（手机屏 2.17 : 1，眼镜屏 1.78 : 1），
+        // 这里按"铺满、超出裁掉"处理，不留黑边。要改回保比例就换 `.resizeAspect`。
+        playerLayer.videoGravity = .resizeAspectFill
         playerLayer.backgroundColor = UIColor.black.cgColor
     }
 
